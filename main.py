@@ -51,7 +51,7 @@ def parse_args() -> argparse.Namespace:
 	parser.add_argument("--direct_n_epoch", type=int, default=200, help="Epochs for DirectAUKG.")
 	parser.add_argument("--direct_n_batch", type=int, default=128, help="Mini-batches per epoch for DirectAUKG.")
 	parser.add_argument("--direct_lr", type=float, default=1e-3, help="Learning rate for DirectAUKG.")
-	parser.add_argument("--direct_gamma", type=float, default=1.0, help="Uniformity loss weight for DirectAUKG.")
+	parser.add_argument("--direct_delta", type=float, default=0.05, help="Uniform noise scale Delta for DirectAUKG.")
 	parser.add_argument("--direct_compose", default="mul", choices=["mul", "add"], help="Composition mode for DirectAUKG.")
 
 	return parser.parse_args()
@@ -101,6 +101,7 @@ def build_runtime_config(args: argparse.Namespace) -> None:
 		"dataset": args.dataset,
 		"task": "comparison",
 		"test_batch_size": args.test_batch_size,
+		"lp_eval_chunk_size": 1024,
 		"log": {
 			"to_file": False,
 			"dump_config": False,
@@ -126,7 +127,7 @@ def build_runtime_config(args: argparse.Namespace) -> None:
 			"optimizer": "Adam",
 			"learning_rate": args.direct_lr,
 			"dim": args.dim,
-			"gamma": args.direct_gamma,
+			"delta": args.direct_delta,
 			"compose_mode": args.direct_compose,
 		},
 	}

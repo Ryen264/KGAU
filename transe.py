@@ -105,7 +105,9 @@ class TransE(BaseModel):
                 epoch_loss += loss.item()
             logging.info('Epoch %d/%d, Loss=%f', epoch + 1, self.n_epoch, epoch_loss / n_train)
             if ((self.n_epoch >= self.epoch_per_test) and ((epoch + 1) % self.epoch_per_test == 0)):
+                logging.info('Running validation at epoch %d...', epoch + 1)
                 test_perf = tester()
+                logging.info('Validation finished at epoch %d: MRR=%f', epoch + 1, test_perf)
                 if (test_perf > best_perf):
                     self.save()
                     best_perf = test_perf

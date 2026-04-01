@@ -182,6 +182,33 @@ class BaseModel(object):
         
         return metrics
 
+    def _score_all_entities_chunked(self, head_id: int, relation_id: int, tail_id: int,
+                                    predict: str, chunk_size: int) -> torch.Tensor:
+        """
+        Score all candidate entities for a single triple in chunks to avoid GPU OOM.
+        predict='head' ranks all possible heads for (?, r, t).
+        predict='tail' ranks all possible tails for (h, r, ?).
+        """
+        scores = torch.empty(self.n_entity, dtype=torch.float32)
+        with torch.no_grad():
+            for start in range(0, self.n_entity, chunk_size):
+                end = min(start + chunk_size, self.n_entity)
+                candidates = torch.arange(start, end, dtype=torch.long, device=config.device)
+                rel = torch.full((end - start,), relation_id, dtype=torch.long, device=config.device)
+
+                if predict == 'head':
+                    head = candidates
+                    tail = torch.full((end - start,), tail_id, dtype=torch.long, device=config.device)
+                elif predict == 'tail':
+                    head = torch.full((end - start,), head_id, dtype=torch.long, device=config.device)
+                    tail = candidates
+                else:
+                    raise ValueError(f"Unknown predict mode: {predict}")
+
+                chunk_scores = self.model.score(head, rel, tail).detach().float().cpu()
+                scores[start:end] = chunk_scores
+        return scores
+
     # --- LINK PREDICTION METHODS ---
     def test_link(self, test_data: list, heads: dict, tails: dict, filt: bool=True, k_list: list=[1, 3, 10]) -> dict:
         self.model.eval()
@@ -189,34 +216,38 @@ class BaseModel(object):
         hits_total = [0] * len(k_list)
         test_data_no_label = test_data[:3]
         count = 0
+        chunk_size = getattr(config._config, 'lp_eval_chunk_size', 1024)
         with torch.no_grad():
             for batch_head, batch_relation, batch_tail in batch_by_size(self.test_batch_size, *test_data_no_label):
-                batch_size = batch_head.size(0)
-
-                head_var = batch_head.unsqueeze(1).expand(batch_size, self.n_entity).to(config.device)
-                relation_var = batch_relation.unsqueeze(1).expand(batch_size, self.n_entity).to(config.device)
-                tail_var = batch_tail.unsqueeze(1).expand(batch_size, self.n_entity).to(config.device)
-                all_var = torch.arange(0, self.n_entity).unsqueeze(0).expand(batch_size, self.n_entity).long().to(config.device)
-
-                batch_head_scores = self.model.score(all_var, relation_var, tail_var)
-                batch_tail_scores = self.model.score(head_var, relation_var, all_var)
-            
-                batch_head_scores = batch_head_scores.detach()
-                batch_tail_scores = batch_tail_scores.detach()
-
-                for head, relation, tail, head_scores, tail_scores in zip(batch_head, batch_relation, batch_tail, batch_head_scores, batch_tail_scores):
+                for head, relation, tail in zip(batch_head, batch_relation, batch_tail):
                     head_id, relation_id, tail_id = head.item(), relation.item(), tail.item()
+
+                    head_scores = self._score_all_entities_chunked(
+                        head_id=head_id,
+                        relation_id=relation_id,
+                        tail_id=tail_id,
+                        predict='head',
+                        chunk_size=chunk_size,
+                    )
+                    tail_scores = self._score_all_entities_chunked(
+                        head_id=head_id,
+                        relation_id=relation_id,
+                        tail_id=tail_id,
+                        predict='tail',
+                        chunk_size=chunk_size,
+                    )
+
                     if filt:
                         key_head = (tail_id, relation_id)
                         if key_head in heads and heads[key_head]._nnz() > 1:
                             tmp = head_scores[head_id].item()
-                            head_scores += heads[key_head].to(config.device) * FILTER_RANKING_PENALTY
+                            head_scores += heads[key_head].to_dense() * FILTER_RANKING_PENALTY
                             head_scores[head_id] = tmp
                             
                         key_tail = (head_id, relation_id)
                         if key_tail in tails and tails[key_tail]._nnz() > 1:
                             tmp = tail_scores[tail_id].item()
-                            tail_scores += tails[key_tail].to(config.device) * FILTER_RANKING_PENALTY
+                            tail_scores += tails[key_tail].to_dense() * FILTER_RANKING_PENALTY
                             tail_scores[tail_id] = tmp
 
                     head_metrics = ranking_metrics(head_scores, head_id, k_list=k_list)

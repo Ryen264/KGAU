@@ -23,20 +23,24 @@ class DirectAU_KGModule(BaseModule):
         self.model_type = 'DirectAU_KG'
 
         self.dim = config.dim
-        self.gamma = getattr(config, 'gamma', 1.0) # Weight of the uniformity loss
+        self.delta = getattr(config, 'delta', 0.0)
         self.compose_mode = getattr(config, 'compose_mode', 'mul') # 'mul' (Hadamard) or 'add'
 
         self.n_entity, self.n_relation = n_entity, n_relation
         self.relation_embed = nn.Embedding(self.n_relation, self.dim)
         self.entity_embed = nn.Embedding(self.n_entity, self.dim)
+        self.relation_proj = nn.Parameter(torch.empty(self.n_relation, self.dim, self.dim))
         self.is_distance_based = True
         self.init_weight()
 
     def init_weight(self) -> None:
-        for param in self.parameters():
-            # Standard initialization, but no renorm_ here since we enforce 
-            # strict projection to the unit hypersphere in the forward pass.
-            param.data.normal_(0, 1 / param.size(1) ** 0.5)
+        self.entity_embed.weight.data.normal_(0, 1 / self.dim ** 0.5)
+        self.relation_embed.weight.data.normal_(0, 1 / self.dim ** 0.5)
+
+        # Initialize relation-specific projections close to identity for stable training.
+        eye = torch.eye(self.dim).unsqueeze(0).repeat(self.n_relation, 1, 1)
+        noise = torch.randn(self.n_relation, self.dim, self.dim) * (0.01 / self.dim ** 0.5)
+        self.relation_proj.data.copy_(eye + noise)
 
     def _normalize(self, x: torch.Tensor) -> torch.Tensor:
         """Projects vectors onto the unit hypersphere."""
@@ -50,31 +54,41 @@ class DirectAU_KGModule(BaseModule):
             q_raw = h + r
         return self._normalize(q_raw)
 
-    def align_loss(self, head: torch.Tensor, relation: torch.Tensor, tail: torch.Tensor) -> torch.Tensor:
-        h_emb = self._normalize(self.entity_embed(head))
-        r_emb = self._normalize(self.relation_embed(relation))
-        t_emb = self._normalize(self.entity_embed(tail))
+    def _project_head(self, h: torch.Tensor, relation: torch.Tensor) -> torch.Tensor:
+        w_r = self.relation_proj[relation]
+        return torch.bmm(w_r, h.unsqueeze(-1)).squeeze(-1)
 
-        q = self._compose(h_emb, r_emb)
+    def _sample_uniform_noise(self, x: torch.Tensor) -> torch.Tensor:
+        if self.delta <= 0:
+            return torch.zeros_like(x)
+        return torch.empty_like(x).uniform_(-self.delta, self.delta)
+
+    def align_loss(self, head: torch.Tensor, relation: torch.Tensor, tail: torch.Tensor) -> torch.Tensor:
+        h_raw = self.entity_embed(head)
+        r_emb = self._normalize(self.relation_embed(relation))
+        t_raw = self.entity_embed(tail)
+
+        # XSimGCL-style perturbation: add uniform noise before L2 normalization.
+        h_emb = self._normalize(h_raw + self._sample_uniform_noise(h_raw))
+        t_emb = self._normalize(t_raw + self._sample_uniform_noise(t_raw))
+
+        # DCCF-style relation-specific projection to reduce 1-to-N collapse.
+        h_rel = self._project_head(h_emb, relation)
+
+        q = self._compose(h_rel, r_emb)
         
         # ALIGN(x, y) = ||x - y||_2^2
         return (q - t_emb).norm(p=2, dim=-1).pow(2).mean()
-
-    def uniformity_loss(self, unique_entities: torch.Tensor) -> torch.Tensor:
-        e_emb = self._normalize(self.entity_embed(unique_entities))
-        
-        # UNI(x) = log(mean(exp(-2 * ||x_i - x_j||_2^2)))
-        # torch.pdist computes flattened pairwise distances without the zero-diagonals
-        dist_sq = torch.pdist(e_emb, p=2).pow(2)
-        return dist_sq.mul(-2).exp().mean().log()
 
     def forward(self, head: torch.Tensor, relation: torch.Tensor, tail: torch.Tensor) -> torch.Tensor:
         # Inference distance used for scoring in link prediction / triple classification
         h_emb = self._normalize(self.entity_embed(head))
         r_emb = self._normalize(self.relation_embed(relation))
         t_emb = self._normalize(self.entity_embed(tail))
+
+        h_rel = self._project_head(h_emb, relation)
         
-        q = self._compose(h_emb, r_emb)
+        q = self._compose(h_rel, r_emb)
         return (q - t_emb).norm(p=2, dim=-1)
 
     def dist(self, head: torch.Tensor, relation: torch.Tensor, tail: torch.Tensor) -> torch.Tensor:
@@ -131,7 +145,7 @@ class DirectAUKG(BaseModel):
             relation = relation[rand_idx].to(config.device)
             tail = tail[rand_idx].to(config.device)
             
-            # Custom batching logic: We drop the corrupter and negative samples entirely
+            # Alignment-only optimization with noise perturbation and relation projections.
             for start_idx in range(0, n_train, self.n_batch):
                 end_idx = min(start_idx + self.n_batch, n_train)
                 
@@ -141,15 +155,7 @@ class DirectAUKG(BaseModel):
                 
                 self.model.zero_grad()
                 
-                # 1. Calculate Alignment Loss
-                loss_align = self.model.align_loss(h_batch, r_batch, t_batch)
-                
-                # 2. Calculate Uniformity Loss on UNIQUE entities in the current batch
-                unique_entities = torch.cat([h_batch, t_batch]).unique()
-                loss_uni = self.model.uniformity_loss(unique_entities)
-                
-                # 3. Total DirectAU Loss
-                loss = loss_align + (self.model.gamma * loss_uni)
+                loss = self.model.align_loss(h_batch, r_batch, t_batch)
                 
                 loss.backward()
                 self.opt.step()
@@ -161,7 +167,9 @@ class DirectAUKG(BaseModel):
 
             # Evaluation and Early Stopping
             if ((self.n_epoch >= self.epoch_per_test) and ((epoch + 1) % self.epoch_per_test == 0)):
+                logging.info('Running validation at epoch %d...', epoch + 1)
                 test_perf = tester()
+                logging.info('Validation finished at epoch %d: MRR=%f', epoch + 1, test_perf)
                 if (test_perf > best_perf):
                     self.save()
                     best_perf = test_perf
