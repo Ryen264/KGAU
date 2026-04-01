@@ -29,6 +29,12 @@ def parse_args() -> argparse.Namespace:
 	parser = argparse.ArgumentParser(
 		description="Train and compare DirectAUKG vs TransE on WN18RR for link prediction and triple classification."
 	)
+	parser.add_argument(
+		"config_path",
+		nargs="?",
+		default=None,
+		help="Optional positional path to YAML config file (e.g. python main.py config/config_wn18rr.yaml).",
+	)
 	parser.add_argument("--config", default="./config/config_wn18rr.yaml", help="Path to YAML config file.")
 	parser.add_argument("--dataset", default="wn18rr", choices=["wn18rr"], help="Dataset name.")
 	parser.add_argument("--data_root", default="./data", help="Root folder that contains dataset files.")
@@ -54,7 +60,10 @@ def parse_args() -> argparse.Namespace:
 	parser.add_argument("--direct_gamma", type=float, default=1.0, help="Uniformity loss weight for DirectAUKG.")
 	parser.add_argument("--direct_compose", default="mul", choices=["mul", "add"], help="Composition mode for DirectAUKG.")
 
-	return parser.parse_args()
+	args = parser.parse_args()
+	if args.config_path:
+		args.config = args.config_path
+	return args
 
 
 def setup_logging(args: argparse.Namespace) -> str:
