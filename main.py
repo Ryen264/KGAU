@@ -24,7 +24,6 @@ class ExperimentResult:
 	link_metrics: Dict[str, float]
 	cls_metrics: Dict[str, float]
 
-
 def parse_args() -> argparse.Namespace:
 	parser = argparse.ArgumentParser(
 		description="Train and compare DirectAUKG vs TransE on WN18RR for link prediction and triple classification."
@@ -65,7 +64,6 @@ def parse_args() -> argparse.Namespace:
 		args.config = args.config_path
 	return args
 
-
 def setup_logging(args: argparse.Namespace) -> str:
 	root_logger = logging.getLogger()
 	root_logger.handlers.clear()
@@ -88,7 +86,6 @@ def setup_logging(args: argparse.Namespace) -> str:
 
 	return log_file_path
 
-
 def set_seed(seed: int) -> None:
 	random.seed(seed)
 	np.random.seed(seed)
@@ -96,14 +93,12 @@ def set_seed(seed: int) -> None:
 	if torch.cuda.is_available():
 		torch.cuda.manual_seed_all(seed)
 
-
 def _to_cfg(obj):
 	if isinstance(obj, dict):
 		return config.ConfigDict({k: _to_cfg(v) for k, v in obj.items()})
 	if isinstance(obj, list):
 		return [_to_cfg(v) for v in obj]
 	return obj
-
 
 def build_runtime_config(args: argparse.Namespace) -> None:
 	runtime_cfg = {
@@ -141,7 +136,6 @@ def build_runtime_config(args: argparse.Namespace) -> None:
 	}
 	config._config = _to_cfg(runtime_cfg)
 
-
 def load_config(args: argparse.Namespace) -> None:
 	if os.path.exists(args.config):
 		cfg = config.config(args.config)
@@ -161,7 +155,6 @@ def load_config(args: argparse.Namespace) -> None:
 		logging.warning("Config file not found at %s. Falling back to runtime defaults.", args.config)
 		build_runtime_config(args)
 
-
 def build_paths(args: argparse.Namespace) -> Dict[str, str]:
 	base_dir = os.path.join(args.data_root, args.dataset)
 	labeled_dir = os.path.join(args.data_root, f"{args.dataset}_w_labels")
@@ -173,22 +166,18 @@ def build_paths(args: argparse.Namespace) -> Dict[str, str]:
 		"test_cls": os.path.join(labeled_dir, "test.txt"),
 	}
 
-
 def validate_paths(paths: Dict[str, str]) -> None:
 	missing = [p for p in paths.values() if not os.path.exists(p)]
 	if missing:
 		raise FileNotFoundError("Missing required files:\n" + "\n".join(missing))
 
-
 def to_tensor_triplets(data: Tuple[list, list, list]) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
 	h, r, t = data
 	return torch.LongTensor(h), torch.LongTensor(r), torch.LongTensor(t)
 
-
 def to_tensor_quadruples(data: Tuple[list, list, list, list]) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
 	h, r, t, y = data
 	return torch.LongTensor(h), torch.LongTensor(r), torch.LongTensor(t), torch.LongTensor(y)
-
 
 def train_and_evaluate(
 	model_name: str,
@@ -237,7 +226,6 @@ def train_and_evaluate(
 		cls_metrics=cls_metrics,
 	)
 
-
 def print_summary(results: Tuple[ExperimentResult, ExperimentResult]) -> None:
 	lines = ["", "=== Comparison On WN18RR ==="]
 	for res in results:
@@ -266,7 +254,6 @@ def print_summary(results: Tuple[ExperimentResult, ExperimentResult]) -> None:
 		print(line)
 		if line:
 			logging.info(line)
-
 
 def main() -> None:
 	args = parse_args()
@@ -326,7 +313,6 @@ def main() -> None:
 	)
 
 	print_summary((direct_result, transe_result))
-
 
 if __name__ == "__main__":
 	main()
