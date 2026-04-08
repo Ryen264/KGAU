@@ -23,7 +23,9 @@ class DirectAU_KGModule(BaseModule):
         self.model_type = 'DirectAU_KG'
 
         self.dim = config.dim
-        self.gamma = getattr(config, 'gamma', 1.0) # Weight of the uniformity loss
+        self.gamma = getattr(config, 'gamma', 1.0) # Backward-compatible default weight.
+        self.gamma_h = getattr(config, 'gamma_h', self.gamma)
+        self.gamma_t = getattr(config, 'gamma_t', self.gamma)
         self.compose_mode = getattr(config, 'compose_mode', 'mul') # 'mul' (Hadamard) or 'add'
 
         self.n_entity, self.n_relation = n_entity, n_relation
@@ -61,6 +63,9 @@ class DirectAU_KGModule(BaseModule):
         return (q - t_emb).norm(p=2, dim=-1).pow(2).mean()
 
     def uniformity_loss(self, unique_entities: torch.Tensor) -> torch.Tensor:
+        if unique_entities.numel() < 2:
+            return torch.zeros((), device=unique_entities.device)
+
         e_emb = self._normalize(self.entity_embed(unique_entities))
         
         # UNI(x) = log(mean(exp(-2 * ||x_i - x_j||_2^2)))
@@ -144,9 +149,12 @@ class DirectAUKG(BaseModel):
                 # 1. Calculate Alignment Loss
                 loss_align = self.model.align_loss(h_batch, r_batch, t_batch)
                 
-                # 2. Calculate Uniformity Loss on UNIQUE entities in the current batch
-                unique_entities = torch.cat([h_batch, t_batch]).unique()
-                loss_uni = self.model.uniformity_loss(unique_entities)
+                # 2. Calculate Uniformity Loss separately for head and tail entities
+                unique_heads = h_batch.unique()
+                unique_tails = t_batch.unique()
+                loss_uni_h = self.model.uniformity_loss(unique_heads)
+                loss_uni_t = self.model.uniformity_loss(unique_tails)
+                loss_uni = (self.model.gamma_h * loss_uni_h) + (self.model.gamma_t * loss_uni_t)
                 
                 # 3. Total DirectAU Loss
                 loss = loss_align + (self.model.gamma * loss_uni)

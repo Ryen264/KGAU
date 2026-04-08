@@ -13,7 +13,6 @@ import config
 from data_loader import graph_size, index_entity_relation, read_data
 from datasets import BernCorrupter, sparse_heads_tails
 from model import DirectAUKG
-from transe import TransE
 
 
 @dataclass
@@ -24,10 +23,9 @@ class ExperimentResult:
 	link_metrics: Dict[str, float]
 	cls_metrics: Dict[str, float]
 
-
 def parse_args() -> argparse.Namespace:
 	parser = argparse.ArgumentParser(
-		description="Train and compare DirectAUKG vs TransE on WN18RR for link prediction and triple classification."
+		description="Train and compare DirectAUKG gamma settings on WN18RR for link prediction and triple classification."
 	)
 	parser.add_argument(
 		"config_path",
@@ -47,24 +45,15 @@ def parse_args() -> argparse.Namespace:
 	parser.add_argument("--dim", type=int, default=200, help="Embedding dimension.")
 	parser.add_argument("--test_batch_size", type=int, default=256, help="Batch size for evaluation.")
 
-	parser.add_argument("--transe_n_epoch", type=int, default=200, help="Epochs for TransE.")
-	parser.add_argument("--transe_n_batch", type=int, default=128, help="Mini-batches per epoch for TransE.")
-	parser.add_argument("--transe_lr", type=float, default=1e-3, help="Learning rate for TransE.")
-	parser.add_argument("--transe_margin", type=float, default=1.0, help="Margin for TransE ranking loss.")
-	parser.add_argument("--transe_p", type=int, default=1, choices=[1, 2], help="Norm type for TransE.")
-	parser.add_argument("--transe_temp", type=float, default=1.0, help="Temperature for TransE logits.")
-
 	parser.add_argument("--direct_n_epoch", type=int, default=200, help="Epochs for DirectAUKG.")
 	parser.add_argument("--direct_n_batch", type=int, default=128, help="Mini-batches per epoch for DirectAUKG.")
 	parser.add_argument("--direct_lr", type=float, default=1e-3, help="Learning rate for DirectAUKG.")
-	parser.add_argument("--direct_gamma", type=float, default=1.0, help="Uniformity loss weight for DirectAUKG.")
 	parser.add_argument("--direct_compose", default="mul", choices=["mul", "add"], help="Composition mode for DirectAUKG.")
 
 	args = parser.parse_args()
 	if args.config_path:
 		args.config = args.config_path
 	return args
-
 
 def setup_logging(args: argparse.Namespace) -> str:
 	root_logger = logging.getLogger()
@@ -81,13 +70,12 @@ def setup_logging(args: argparse.Namespace) -> str:
 		log_task_dir = os.path.join(args.log_dir, args.dataset, "comparison")
 		os.makedirs(log_task_dir, exist_ok=True)
 		ts = time.strftime("%y%m%d-%H%M%S")
-		log_file_path = os.path.join(log_task_dir, f"compare_directaukg_transe_{ts}.log")
+		log_file_path = os.path.join(log_task_dir, f"compare_directaukg_gamma_sweep_{ts}.log")
 		file_handler = logging.FileHandler(log_file_path)
 		file_handler.setFormatter(formatter)
 		root_logger.addHandler(file_handler)
 
 	return log_file_path
-
 
 def set_seed(seed: int) -> None:
 	random.seed(seed)
@@ -96,7 +84,6 @@ def set_seed(seed: int) -> None:
 	if torch.cuda.is_available():
 		torch.cuda.manual_seed_all(seed)
 
-
 def _to_cfg(obj):
 	if isinstance(obj, dict):
 		return config.ConfigDict({k: _to_cfg(v) for k, v in obj.items()})
@@ -104,6 +91,30 @@ def _to_cfg(obj):
 		return [_to_cfg(v) for v in obj]
 	return obj
 
+def _clone_cfg(cfg):
+	if isinstance(cfg, dict):
+		return config.ConfigDict({k: _clone_cfg(v) for k, v in cfg.items()})
+	if isinstance(cfg, list):
+		return [_clone_cfg(v) for v in cfg]
+	return cfg
+
+def _format_gamma(value: float) -> str:
+	text = f"{value:g}"
+	return text.replace(".", "p")
+
+def build_direct_gamma_configs(base_cfg, gamma_variants: list) -> list[tuple[float, float, object]]:
+	configs = []
+	for gamma_h, gamma_t in gamma_variants:
+		variant_cfg = _clone_cfg(base_cfg)
+		direct_cfg = variant_cfg["DirectAU_KG"] if "DirectAU_KG" in variant_cfg else variant_cfg["DirectAUKG"]
+		direct_cfg["gamma_h"] = gamma_h
+		direct_cfg["gamma_t"] = gamma_t
+		direct_cfg["model_file"] = f"DirectAUKG_gh{_format_gamma(gamma_h)}_gt{_format_gamma(gamma_t)}.mdl"
+		variant_cfg["DirectAU_KG"] = direct_cfg
+		if "DirectAUKG" in variant_cfg:
+			variant_cfg["DirectAUKG"] = direct_cfg
+		configs.append((gamma_h, gamma_t, variant_cfg))
+	return configs
 
 def build_runtime_config(args: argparse.Namespace) -> None:
 	runtime_cfg = {
@@ -115,18 +126,6 @@ def build_runtime_config(args: argparse.Namespace) -> None:
 			"dump_config": False,
 			"prefix": "kgau",
 		},
-		"TransE": {
-			"model_file": "transe.pt",
-			"n_epoch": args.transe_n_epoch,
-			"n_batch": args.transe_n_batch,
-			"epoch_per_test": 5,
-			"optimizer": "Adam",
-			"learning_rate": args.transe_lr,
-			"dim": args.dim,
-			"margin": args.transe_margin,
-			"p": args.transe_p,
-			"temp": args.transe_temp,
-		},
 		"DirectAU_KG": {
 			"model_file": "directaukg.pt",
 			"n_epoch": args.direct_n_epoch,
@@ -135,12 +134,12 @@ def build_runtime_config(args: argparse.Namespace) -> None:
 			"optimizer": "Adam",
 			"learning_rate": args.direct_lr,
 			"dim": args.dim,
-			"gamma": args.direct_gamma,
+			"gamma_h": 1.0,
+			"gamma_t": 1.0,
 			"compose_mode": args.direct_compose,
 		},
 	}
 	config._config = _to_cfg(runtime_cfg)
-
 
 def load_config(args: argparse.Namespace) -> None:
 	if os.path.exists(args.config):
@@ -161,7 +160,6 @@ def load_config(args: argparse.Namespace) -> None:
 		logging.warning("Config file not found at %s. Falling back to runtime defaults.", args.config)
 		build_runtime_config(args)
 
-
 def build_paths(args: argparse.Namespace) -> Dict[str, str]:
 	base_dir = os.path.join(args.data_root, args.dataset)
 	labeled_dir = os.path.join(args.data_root, f"{args.dataset}_w_labels")
@@ -173,22 +171,18 @@ def build_paths(args: argparse.Namespace) -> Dict[str, str]:
 		"test_cls": os.path.join(labeled_dir, "test.txt"),
 	}
 
-
 def validate_paths(paths: Dict[str, str]) -> None:
 	missing = [p for p in paths.values() if not os.path.exists(p)]
 	if missing:
 		raise FileNotFoundError("Missing required files:\n" + "\n".join(missing))
 
-
 def to_tensor_triplets(data: Tuple[list, list, list]) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
 	h, r, t = data
 	return torch.LongTensor(h), torch.LongTensor(r), torch.LongTensor(t)
 
-
 def to_tensor_quadruples(data: Tuple[list, list, list, list]) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
 	h, r, t, y = data
 	return torch.LongTensor(h), torch.LongTensor(r), torch.LongTensor(t), torch.LongTensor(y)
-
 
 def train_and_evaluate(
 	model_name: str,
@@ -237,9 +231,8 @@ def train_and_evaluate(
 		cls_metrics=cls_metrics,
 	)
 
-
-def print_summary(results: Tuple[ExperimentResult, ExperimentResult]) -> None:
-	lines = ["", "=== Comparison On WN18RR ==="]
+def print_summary(results: Tuple[ExperimentResult, ...]) -> None:
+	lines = ["", "=== DirectAUKG Gamma Sweep On WN18RR ==="]
 	for res in results:
 		lines.append("")
 		lines.append(f"[{res.model_name}]")
@@ -269,6 +262,8 @@ def print_summary(results: Tuple[ExperimentResult, ExperimentResult]) -> None:
 
 
 def main() -> None:
+	gamma_variants = [(0.0, 0.0), (1.0, 0.0), (0.0, 1.0), (1.0, 1.0), (0.5, 0.5)]
+
 	args = parse_args()
 	set_seed(args.seed)
 	load_config(args)
@@ -298,34 +293,27 @@ def main() -> None:
 	valid_cls = to_tensor_quadruples(read_data(paths["valid_cls"], kb_index, with_label=True))
 	test_cls = to_tensor_quadruples(read_data(paths["test_cls"], kb_index, with_label=True))
 
-	direct_model = DirectAUKG(n_entity, n_relation)
-	transe_model = TransE(n_entity, n_relation)
+	base_cfg = _clone_cfg(config._config)
+	results = []
+	for gamma_h, gamma_t, variant_cfg in build_direct_gamma_configs(base_cfg, gamma_variants):
+		set_seed(args.seed)
+		config._config = variant_cfg
+		direct_model = DirectAUKG(n_entity, n_relation)
+		result = train_and_evaluate(
+			model_name=f"DirectAUKG (gamma_h={gamma_h:g}, gamma_t={gamma_t:g})",
+			model=direct_model,
+			train_triplets=train_triplets,
+			valid_triplets=valid_triplets,
+			test_triplets=test_triplets,
+			valid_cls=valid_cls,
+			test_cls=test_cls,
+			n_entity=n_entity,
+			early_stop_patience=args.early_stop_patience,
+		)
+		results.append(result)
 
-	direct_result = train_and_evaluate(
-		model_name="DirectAUKG",
-		model=direct_model,
-		train_triplets=train_triplets,
-		valid_triplets=valid_triplets,
-		test_triplets=test_triplets,
-		valid_cls=valid_cls,
-		test_cls=test_cls,
-		n_entity=n_entity,
-		early_stop_patience=args.early_stop_patience,
-	)
-
-	transe_result = train_and_evaluate(
-		model_name="TransE",
-		model=transe_model,
-		train_triplets=train_triplets,
-		valid_triplets=valid_triplets,
-		test_triplets=test_triplets,
-		valid_cls=valid_cls,
-		test_cls=test_cls,
-		n_entity=n_entity,
-		early_stop_patience=args.early_stop_patience,
-	)
-
-	print_summary((direct_result, transe_result))
+	config._config = base_cfg
+	print_summary(tuple(results))
 
 
 if __name__ == "__main__":
