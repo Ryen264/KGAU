@@ -262,7 +262,7 @@ def print_summary(results: Tuple[ExperimentResult, ...]) -> None:
 
 
 def main() -> None:
-	gamma_variants = [(0.0, 0.0), (1.0, 0.0), (0.0, 1.0), (1.0, 1.0), (0.5, 0.5)]
+	gamma_variants = [(0.0, 0.55), (0.0, 0.6), (0.0, 0.65), (0.0, 0.85), (0.0, 0.9), (0.0, 0.95)]
 
 	args = parse_args()
 	set_seed(args.seed)
