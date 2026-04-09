@@ -130,15 +130,52 @@ def select_gpu() -> int:
             return i
         
 def set_device(gpu_id: int) -> torch.device:
-    if gpu_id is not None and torch.cuda.is_available():
+    def _cpu_fallback(reason: str) -> torch.device:
+        logging.warning("%s Falling back to CPU.", reason)
+        return torch.device("cpu")
+
+    if gpu_id is None or not torch.cuda.is_available():
+        logging.info("No GPU available. Running on CPU.")
+        return torch.device("cpu")
+
+    try:
         torch.cuda.set_device(gpu_id)
         device = torch.device(f"cuda:{gpu_id}")
-        logging.info(f"Using GPU: {device}")
+        dev_name = torch.cuda.get_device_name(gpu_id)
+        capability = torch.cuda.get_device_capability(gpu_id)
+        arch_list = torch.cuda.get_arch_list() if hasattr(torch.cuda, 'get_arch_list') else []
+        required_arch = f"sm_{capability[0]}{capability[1]}"
+
+        if arch_list and required_arch not in arch_list:
+            return _cpu_fallback(
+                "CUDA runtime mismatch: this PyTorch build does not contain kernels for "
+                f"{required_arch}. Available arches={arch_list}, torch_cuda={torch.version.cuda}."
+            )
+
+        # Probe a tiny CUDA kernel early so incompatibilities surface here instead of deep in training.
+        probe = torch.ones(1, device=device)
+        probe = probe + 1
+        if hasattr(torch.cuda, "synchronize"):
+            torch.cuda.synchronize(device)
+
+        logging.info(
+            "Using GPU: %s | name=%s | capability=sm_%d%d | torch_cuda=%s | build_arches=%s",
+            device,
+            dev_name,
+            capability[0],
+            capability[1],
+            torch.version.cuda,
+            arch_list,
+        )
         return device
-    else:
-        device = torch.device("cpu")
-        logging.info("No GPU available. Running on CPU.")
-        return device
+    except Exception as exc:
+        msg = str(exc)
+        if 'no kernel image is available for execution on the device' in msg:
+            return _cpu_fallback(
+                "CUDA runtime mismatch: installed PyTorch/CUDA build does not support this GPU architecture. "
+                f"gpu_id={gpu_id}, torch_cuda={torch.version.cuda}."
+            )
+        return _cpu_fallback(f"CUDA initialization failed: {msg}")
 
 
 def build_timestamped_filename(prefix: str, ext: str) -> str:
@@ -177,11 +214,4 @@ def log_step(label: str, start_ts: float) -> float:
     return time.perf_counter()
 
 gpu_id = select_gpu()
-device = None
-if gpu_id is not None and torch.cuda.is_available():
-    torch.cuda.set_device(gpu_id)
-    device = torch.device(f"cuda:{gpu_id}")
-    logging.info(f"Using GPU: {device}")
-else:
-    device = torch.device("cpu")
-    logging.info("No GPU available. Running on CPU.")
+device = set_device(gpu_id)

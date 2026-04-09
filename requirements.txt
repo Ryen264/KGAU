@@ -1,4 +1,8 @@
-numpy
-torch
-PyYAML
-transformers
+# For NVIDIA P100 (sm_60) on Kaggle/Colab, install with:
+#   pip install --no-cache-dir --index-url https://download.pytorch.org/whl/cu118 -r requirements.txt
+# This ensures a CUDA wheel that includes kernels for older Pascal GPUs.
+
+numpy==1.26.4
+torch==2.2.2
+PyYAML==6.0.1
+transformers==4.41.2

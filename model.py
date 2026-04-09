@@ -52,6 +52,11 @@ class DirectAU_KGModule(BaseModule):
         if self.use_gradient_checkpointing:
             self.hr_encoder.gradient_checkpointing_enable()
             self.t_encoder.gradient_checkpointing_enable()
+            # Required when embeddings are frozen: checkpointed blocks need at least one grad-carrying input.
+            if hasattr(self.hr_encoder, 'enable_input_require_grads'):
+                self.hr_encoder.enable_input_require_grads()
+            if hasattr(self.t_encoder, 'enable_input_require_grads'):
+                self.t_encoder.enable_input_require_grads()
             # Disable KV cache when checkpointing to prevent incompatibilities and extra memory.
             if hasattr(self.hr_encoder.config, 'use_cache'):
                 self.hr_encoder.config.use_cache = False
@@ -229,6 +234,11 @@ class DirectAUKG(BaseModel):
         self.uses_negative_sampling = False
 
         trainable_params = [p for p in self.model.parameters() if p.requires_grad]
+        if not trainable_params:
+            raise RuntimeError(
+                "No trainable parameters found in DirectAUKG. "
+                "Please reduce freeze settings (freeze_embeddings/freeze_lower_layers)."
+            )
         self.opt = OPTIMIZER_MAP[self.optimizer_name](trainable_params, lr=self.lr)
         self.scaler = torch.cuda.amp.GradScaler(enabled=self.amp_enabled)
 
