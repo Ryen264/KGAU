@@ -72,6 +72,7 @@ class TransE(BaseModel):
         self.model = TransEModule(self.n_entity, self.n_relation, self.model_config)
         self.model.to(config.device)
         self.is_distance_based = self.model.is_distance_based
+        self.uses_negative_sampling = True
         self.margin = self.model.margin
         self.opt = OPTIMIZER_MAP[self.optimizer_name](self.model.parameters(), lr=self.lr)
 

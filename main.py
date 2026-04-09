@@ -2,9 +2,10 @@ import argparse
 import logging
 import os
 import random
+import re
 import time
 from dataclasses import dataclass
-from typing import Dict, Tuple
+from typing import Dict, List, Tuple
 
 import numpy as np
 import torch
@@ -58,6 +59,9 @@ def parse_args() -> argparse.Namespace:
 	parser.add_argument("--direct_n_batch", type=int, default=128, help="Mini-batches per epoch for DirectAUKG.")
 	parser.add_argument("--direct_lr", type=float, default=1e-3, help="Learning rate for DirectAUKG.")
 	parser.add_argument("--direct_gamma", type=float, default=1.0, help="Uniformity loss weight for DirectAUKG.")
+	parser.add_argument("--direct_encoder_name", default="bert-base-uncased", help="HuggingFace encoder name for DirectAUKG bi-encoder towers.")
+	parser.add_argument("--direct_max_length", type=int, default=64, help="Max token length for DirectAUKG text encoding.")
+	parser.add_argument("--direct_encode_batch_size", type=int, default=64, help="Tokenizer/encoder micro-batch size for DirectAUKG.")
 	parser.add_argument("--direct_compose", default="mul", choices=["mul", "add"], help="Composition mode for DirectAUKG.")
 
 	args = parser.parse_args()
@@ -136,6 +140,9 @@ def build_runtime_config(args: argparse.Namespace) -> None:
 			"learning_rate": args.direct_lr,
 			"dim": args.dim,
 			"gamma": args.direct_gamma,
+			"encoder_name": args.direct_encoder_name,
+			"max_length": args.direct_max_length,
+			"encode_batch_size": args.direct_encode_batch_size,
 			"compose_mode": args.direct_compose,
 		},
 	}
@@ -174,6 +181,39 @@ def build_paths(args: argparse.Namespace) -> Dict[str, str]:
 	}
 
 
+def _decode_wordnet_lemma(raw_lemma: str) -> str:
+	lemma = raw_lemma.strip()
+	if lemma.startswith("__"):
+		lemma = lemma[2:]
+	lemma = re.sub(r"_[A-Z]{2}_[0-9]+$", "", lemma)
+	lemma = lemma.replace("_", " ")
+	return lemma.strip()
+
+
+def build_text_corpora(args: argparse.Namespace, kb_index) -> Tuple[List[str], List[str]]:
+	if args.dataset == "wn18rr":
+		definitions_path = os.path.join(args.data_root, "wn18rr", "wordnet-mlj12-definitions.txt")
+		definition_map: Dict[str, str] = {}
+		if os.path.exists(definitions_path):
+			with open(definitions_path, encoding="utf-8") as f:
+				for line in f:
+					parts = line.rstrip("\n").split("\t", 2)
+					if len(parts) < 2:
+						continue
+					synset_id = parts[0].strip()
+					lemma = _decode_wordnet_lemma(parts[1])
+					definition = parts[2].strip() if len(parts) > 2 else ""
+					definition_map[synset_id] = f"{lemma}. {definition}" if definition else lemma
+
+		entity_texts = [definition_map.get(symbol, symbol) for symbol in kb_index.entity_list]
+		relation_texts = [rel.strip("_").replace("_", " ") for rel in kb_index.relation_list]
+		return entity_texts, relation_texts
+
+	entity_texts = list(kb_index.entity_list)
+	relation_texts = [rel.strip("_").replace("_", " ") for rel in kb_index.relation_list]
+	return entity_texts, relation_texts
+
+
 def validate_paths(paths: Dict[str, str]) -> None:
 	missing = [p for p in paths.values() if not os.path.exists(p)]
 	if missing:
@@ -208,7 +248,9 @@ def train_and_evaluate(
 	eval_heads_valid, eval_tails_valid = sparse_heads_tails(n_entity, train_lists, valid_lists, None)
 	eval_heads_test, eval_tails_test = sparse_heads_tails(n_entity, train_lists, valid_lists, test_lists)
 
-	corrupter = BernCorrupter(train_lists, n_entity, model.n_relation)
+	corrupter = None
+	if getattr(model, "uses_negative_sampling", True):
+		corrupter = BernCorrupter(train_lists, n_entity, model.n_relation)
 
 	def valid_link_tester() -> float:
 		valid_metrics = model.test_link(valid_triplets, eval_heads_valid, eval_tails_valid, filt=True)
@@ -291,6 +333,7 @@ def main() -> None:
 	)
 	n_entity, n_relation = graph_size(kb_index)
 	logging.info("Graph size: n_entity=%d, n_relation=%d", n_entity, n_relation)
+	entity_texts, relation_texts = build_text_corpora(args, kb_index)
 
 	train_triplets = to_tensor_triplets(read_data(paths["train"], kb_index))
 	valid_triplets = to_tensor_triplets(read_data(paths["valid"], kb_index))
@@ -298,7 +341,7 @@ def main() -> None:
 	valid_cls = to_tensor_quadruples(read_data(paths["valid_cls"], kb_index, with_label=True))
 	test_cls = to_tensor_quadruples(read_data(paths["test_cls"], kb_index, with_label=True))
 
-	direct_model = DirectAUKG(n_entity, n_relation)
+	direct_model = DirectAUKG(n_entity, n_relation, entity_texts, relation_texts)
 	transe_model = TransE(n_entity, n_relation)
 
 	direct_result = train_and_evaluate(

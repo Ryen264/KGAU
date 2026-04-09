@@ -2,11 +2,13 @@ import torch
 import torch.nn as nn
 import logging
 import os
-from typing import Tuple
+from typing import List, Tuple
 from torch.optim import Adam, SGD, Adagrad, RMSprop
+from transformers import AutoModel, AutoTokenizer
 
 import config
 from base_model import BaseModule, BaseModel
+from datasets import batch_by_num
 
 OPTIMIZER_MAP = {
     'Adam': Adam,
@@ -18,64 +20,133 @@ OPTIMIZER_MAP = {
 EPSILON = 1e-8
 
 class DirectAU_KGModule(BaseModule):
-    def __init__(self, n_entity: int, n_relation: int, config: config.config):
+    def __init__(
+        self,
+        n_entity: int,
+        n_relation: int,
+        model_config: config.config,
+        entity_texts: List[str],
+        relation_texts: List[str],
+    ):
         super().__init__()
         self.model_type = 'DirectAU_KG'
 
-        self.dim = config.dim
-        self.gamma = getattr(config, 'gamma', 1.0) # Weight of the uniformity loss
-        self.compose_mode = getattr(config, 'compose_mode', 'mul') # 'mul' (Hadamard) or 'add'
+        self.gamma = model_config.get('gamma', 1.0)  # Weight of the uniformity loss
+        self.encoder_name = model_config.get('encoder_name', 'bert-base-uncased')
+        self.max_length = model_config.get('max_length', 64)
+        self.encode_batch_size = model_config.get('encode_batch_size', 64)
+        self.temp = model_config.get('temp', 1.0)
 
         self.n_entity, self.n_relation = n_entity, n_relation
-        self.relation_embed = nn.Embedding(self.n_relation, self.dim)
-        self.entity_embed = nn.Embedding(self.n_entity, self.dim)
-        self.is_distance_based = True
-        self.init_weight()
+        self.entity_texts = entity_texts
+        self.relation_texts = relation_texts
 
-    def init_weight(self) -> None:
-        for param in self.parameters():
-            # Standard initialization, but no renorm_ here since we enforce 
-            # strict projection to the unit hypersphere in the forward pass.
-            param.data.normal_(0, 1 / param.size(1) ** 0.5)
+        self.tokenizer = AutoTokenizer.from_pretrained(self.encoder_name)
+        self.hr_encoder = AutoModel.from_pretrained(self.encoder_name)
+        self.t_encoder = AutoModel.from_pretrained(self.encoder_name)
+
+        self.dim = self.hr_encoder.config.hidden_size
+        self.is_distance_based = True
 
     def _normalize(self, x: torch.Tensor) -> torch.Tensor:
         """Projects vectors onto the unit hypersphere."""
         return x / (x.norm(p=2, dim=-1, keepdim=True) + EPSILON)
 
-    def _compose(self, h: torch.Tensor, r: torch.Tensor) -> torch.Tensor:
-        """Composes head and relation, then re-normalizes."""
-        if self.compose_mode == 'mul':
-            q_raw = h * r
-        else:
-            q_raw = h + r
+    def _mean_pool(self, last_hidden_state: torch.Tensor, attention_mask: torch.Tensor) -> torch.Tensor:
+        mask = attention_mask.unsqueeze(-1).type_as(last_hidden_state)
+        sum_emb = (last_hidden_state * mask).sum(dim=1)
+        denom = mask.sum(dim=1).clamp(min=1.0)
+        return sum_emb / denom
+
+    def _ids_to_texts(self, ids: torch.Tensor, text_table: List[str]) -> List[str]:
+        return [text_table[i] for i in ids.detach().cpu().tolist()]
+
+    def _encode_text_pairs(self, left_texts: List[str], right_texts: List[str]) -> torch.Tensor:
+        outputs = []
+        for start in range(0, len(left_texts), self.encode_batch_size):
+            end = start + self.encode_batch_size
+            # Let the backbone tokenizer inject separator/special tokens in its native format.
+            encoded = self.tokenizer(
+                left_texts[start:end],
+                right_texts[start:end],
+                padding=True,
+                truncation=True,
+                max_length=self.max_length,
+                return_tensors='pt',
+            )
+            encoded = {k: v.to(config.device) for k, v in encoded.items()}
+            hidden = self.hr_encoder(**encoded).last_hidden_state
+            pooled = self._mean_pool(hidden, encoded['attention_mask'])
+            outputs.append(pooled)
+        return torch.cat(outputs, dim=0)
+
+    def _encode_single_texts(self, texts: List[str]) -> torch.Tensor:
+        outputs = []
+        for start in range(0, len(texts), self.encode_batch_size):
+            end = start + self.encode_batch_size
+            encoded = self.tokenizer(
+                texts[start:end],
+                padding=True,
+                truncation=True,
+                max_length=self.max_length,
+                return_tensors='pt',
+            )
+            encoded = {k: v.to(config.device) for k, v in encoded.items()}
+            hidden = self.t_encoder(**encoded).last_hidden_state
+            pooled = self._mean_pool(hidden, encoded['attention_mask'])
+            outputs.append(pooled)
+        return torch.cat(outputs, dim=0)
+
+    def encode_query(self, head: torch.Tensor, relation: torch.Tensor) -> torch.Tensor:
+        head_texts = self._ids_to_texts(head, self.entity_texts)
+        relation_texts = self._ids_to_texts(relation, self.relation_texts)
+        q_raw = self._encode_text_pairs(head_texts, relation_texts)
         return self._normalize(q_raw)
 
-    def align_loss(self, head: torch.Tensor, relation: torch.Tensor, tail: torch.Tensor) -> torch.Tensor:
-        h_emb = self._normalize(self.entity_embed(head))
-        r_emb = self._normalize(self.relation_embed(relation))
-        t_emb = self._normalize(self.entity_embed(tail))
+    def encode_tail(self, tail: torch.Tensor) -> torch.Tensor:
+        tail_texts = self._ids_to_texts(tail, self.entity_texts)
+        t_raw = self._encode_single_texts(tail_texts)
+        return self._normalize(t_raw)
 
-        q = self._compose(h_emb, r_emb)
+    def align_loss(self, head: torch.Tensor, relation: torch.Tensor, tail: torch.Tensor) -> torch.Tensor:
+        q = self.encode_query(head, relation)
+        t_emb = self.encode_tail(tail)
         
         # ALIGN(x, y) = ||x - y||_2^2
         return (q - t_emb).norm(p=2, dim=-1).pow(2).mean()
 
-    def uniformity_loss(self, unique_entities: torch.Tensor) -> torch.Tensor:
-        e_emb = self._normalize(self.entity_embed(unique_entities))
+    def uniformity_loss(self, x: torch.Tensor) -> torch.Tensor:
+        # Uniformity is undefined for fewer than 2 vectors; keep training stable.
+        if x.size(0) < 2:
+            return torch.zeros((), device=x.device, dtype=x.dtype)
         
         # UNI(x) = log(mean(exp(-2 * ||x_i - x_j||_2^2)))
         # torch.pdist computes flattened pairwise distances without the zero-diagonals
-        dist_sq = torch.pdist(e_emb, p=2).pow(2)
+        dist_sq = torch.pdist(x, p=2).pow(2)
         return dist_sq.mul(-2).exp().mean().log()
 
     def forward(self, head: torch.Tensor, relation: torch.Tensor, tail: torch.Tensor) -> torch.Tensor:
         # Inference distance used for scoring in link prediction / triple classification
-        h_emb = self._normalize(self.entity_embed(head))
-        r_emb = self._normalize(self.relation_embed(relation))
-        t_emb = self._normalize(self.entity_embed(tail))
-        
-        q = self._compose(h_emb, r_emb)
-        return (q - t_emb).norm(p=2, dim=-1)
+        flat_shape = head.shape
+
+        head_flat = head.reshape(-1)
+        relation_flat = relation.reshape(-1)
+        tail_flat = tail.reshape(-1)
+
+        unique_queries, q_inverse = torch.unique(
+            torch.stack([head_flat, relation_flat], dim=1),
+            dim=0,
+            return_inverse=True,
+        )
+        q_unique_emb = self.encode_query(unique_queries[:, 0], unique_queries[:, 1])
+        q_emb = q_unique_emb[q_inverse]
+
+        unique_tails, t_inverse = torch.unique(tail_flat, return_inverse=True)
+        t_unique_emb = self.encode_tail(unique_tails)
+        t_emb = t_unique_emb[t_inverse]
+
+        dist = (q_emb - t_emb).norm(p=2, dim=-1)
+        return dist.reshape(flat_shape)
 
     def dist(self, head: torch.Tensor, relation: torch.Tensor, tail: torch.Tensor) -> torch.Tensor:
         return self.forward(head, relation, tail)
@@ -94,7 +165,7 @@ class DirectAU_KGModule(BaseModule):
 
 
 class DirectAUKG(BaseModel):
-    def __init__(self, n_entity: int, n_relation: int):
+    def __init__(self, n_entity: int, n_relation: int, entity_texts: List[str], relation_texts: List[str]):
         super().__init__(n_entity, n_relation)
         self.model_type = 'DirectAU_KG'
         self.model_config = config._config[self.model_type]
@@ -107,9 +178,16 @@ class DirectAUKG(BaseModel):
         self.optimizer_name = self.model_config.optimizer
         self.lr = self.model_config.learning_rate
 
-        self.model = DirectAU_KGModule(self.n_entity, self.n_relation, self.model_config)
+        self.model = DirectAU_KGModule(
+            self.n_entity,
+            self.n_relation,
+            self.model_config,
+            entity_texts,
+            relation_texts,
+        )
         self.model.to(config.device)
         self.is_distance_based = self.model.is_distance_based
+        self.uses_negative_sampling = False
         
         self.opt = OPTIMIZER_MAP[self.optimizer_name](self.model.parameters(), lr=self.lr)
 
@@ -127,26 +205,34 @@ class DirectAUKG(BaseModel):
             
             # Shuffle data
             rand_idx = torch.randperm(n_train)
-            head = head[rand_idx].to(config.device)
-            relation = relation[rand_idx].to(config.device)
-            tail = tail[rand_idx].to(config.device)
+            head_device = head[rand_idx].to(config.device)
+            relation_device = relation[rand_idx].to(config.device)
+            tail_device = tail[rand_idx].to(config.device)
             
-            # Custom batching logic: We drop the corrupter and negative samples entirely
-            for start_idx in range(0, n_train, self.n_batch):
-                end_idx = min(start_idx + self.n_batch, n_train)
-                
-                h_batch = head[start_idx:end_idx]
-                r_batch = relation[start_idx:end_idx]
-                t_batch = tail[start_idx:end_idx]
+            # Train without corrupted negatives: DirectAU uses alignment + global uniformity.
+            for h_batch, r_batch, t_batch in batch_by_num(
+                self.n_batch,
+                head_device,
+                relation_device,
+                tail_device,
+                n_sample=n_train,
+            ):
                 
                 self.model.zero_grad()
                 
                 # 1. Calculate Alignment Loss
                 loss_align = self.model.align_loss(h_batch, r_batch, t_batch)
                 
-                # 2. Calculate Uniformity Loss on UNIQUE entities in the current batch
-                unique_entities = torch.cat([h_batch, t_batch]).unique()
-                loss_uni = self.model.uniformity_loss(unique_entities)
+                # 2. Calculate Uniformity Loss on unique queries (h, r) and unique tails t
+                unique_queries = torch.unique(torch.stack([h_batch, r_batch], dim=1), dim=0)
+                q_batch = self.model.encode_query(unique_queries[:, 0], unique_queries[:, 1])
+
+                unique_tails = torch.unique(t_batch)
+                t_batch_unique = self.model.encode_tail(unique_tails)
+
+                loss_uni_q = self.model.uniformity_loss(q_batch)
+                loss_uni_t = self.model.uniformity_loss(t_batch_unique)
+                loss_uni = 0.5 * (loss_uni_q + loss_uni_t)
                 
                 # 3. Total DirectAU Loss
                 loss = loss_align + (self.model.gamma * loss_uni)
@@ -154,7 +240,7 @@ class DirectAUKG(BaseModel):
                 loss.backward()
                 self.opt.step()
                 
-                epoch_loss += loss.item() * (end_idx - start_idx)
+                epoch_loss += loss.item() * h_batch.size(0)
 
             avg_loss = epoch_loss / n_train
             logging.info('Epoch %d/%d, Total Loss=%f', epoch + 1, self.n_epoch, avg_loss)
