@@ -45,6 +45,41 @@ class DirectAU_KGModule(BaseModule):
         self.hr_encoder = AutoModel.from_pretrained(self.encoder_name)
         self.t_encoder = AutoModel.from_pretrained(self.encoder_name)
 
+        self.use_gradient_checkpointing = model_config.get('gradient_checkpointing', True)
+        self.freeze_lower_layers = int(model_config.get('freeze_lower_layers', 0))
+        self.freeze_embeddings = bool(model_config.get('freeze_embeddings', False))
+
+        if self.use_gradient_checkpointing:
+            self.hr_encoder.gradient_checkpointing_enable()
+            self.t_encoder.gradient_checkpointing_enable()
+            # Disable KV cache when checkpointing to prevent incompatibilities and extra memory.
+            if hasattr(self.hr_encoder.config, 'use_cache'):
+                self.hr_encoder.config.use_cache = False
+            if hasattr(self.t_encoder.config, 'use_cache'):
+                self.t_encoder.config.use_cache = False
+
+        if self.freeze_embeddings:
+            if hasattr(self.hr_encoder, 'embeddings'):
+                for param in self.hr_encoder.embeddings.parameters():
+                    param.requires_grad = False
+            if hasattr(self.t_encoder, 'embeddings'):
+                for param in self.t_encoder.embeddings.parameters():
+                    param.requires_grad = False
+
+        if self.freeze_lower_layers > 0:
+            if hasattr(self.hr_encoder, 'encoder') and hasattr(self.hr_encoder.encoder, 'layer'):
+                hr_layers = len(self.hr_encoder.encoder.layer)
+                n_freeze_hr = min(self.freeze_lower_layers, hr_layers)
+                for i in range(n_freeze_hr):
+                    for param in self.hr_encoder.encoder.layer[i].parameters():
+                        param.requires_grad = False
+            if hasattr(self.t_encoder, 'encoder') and hasattr(self.t_encoder.encoder, 'layer'):
+                t_layers = len(self.t_encoder.encoder.layer)
+                n_freeze_t = min(self.freeze_lower_layers, t_layers)
+                for i in range(n_freeze_t):
+                    for param in self.t_encoder.encoder.layer[i].parameters():
+                        param.requires_grad = False
+
         self.dim = self.hr_encoder.config.hidden_size
         self.is_distance_based = True
 
@@ -177,6 +212,10 @@ class DirectAUKG(BaseModel):
 
         self.optimizer_name = self.model_config.optimizer
         self.lr = self.model_config.learning_rate
+        self.grad_accum_steps = max(1, int(self.model_config.get('grad_accum_steps', 1)))
+        self.amp_enabled = bool(self.model_config.get('amp', True)) and config.device.type == 'cuda'
+        amp_dtype_name = str(self.model_config.get('amp_dtype', 'fp16')).lower()
+        self.amp_dtype = torch.float16 if amp_dtype_name == 'fp16' else torch.bfloat16
 
         self.model = DirectAU_KGModule(
             self.n_entity,
@@ -188,8 +227,21 @@ class DirectAUKG(BaseModel):
         self.model.to(config.device)
         self.is_distance_based = self.model.is_distance_based
         self.uses_negative_sampling = False
-        
-        self.opt = OPTIMIZER_MAP[self.optimizer_name](self.model.parameters(), lr=self.lr)
+
+        trainable_params = [p for p in self.model.parameters() if p.requires_grad]
+        self.opt = OPTIMIZER_MAP[self.optimizer_name](trainable_params, lr=self.lr)
+        self.scaler = torch.cuda.amp.GradScaler(enabled=self.amp_enabled)
+
+        logging.info(
+            'DirectAUKG memory settings: amp=%s (%s), grad_accum_steps=%d, gradient_checkpointing=%s, '
+            'freeze_embeddings=%s, freeze_lower_layers=%d',
+            self.amp_enabled,
+            'fp16' if self.amp_dtype == torch.float16 else 'bf16',
+            self.grad_accum_steps,
+            self.model.use_gradient_checkpointing,
+            self.model.freeze_embeddings,
+            self.model.freeze_lower_layers,
+        )
 
     def train(self, train_data: Tuple[torch.Tensor, torch.Tensor, torch.Tensor],
               corrupter, tester, early_stop_patience: int=-1) -> tuple[float, int]:
@@ -202,13 +254,17 @@ class DirectAUKG(BaseModel):
 
         for epoch in range(self.n_epoch):
             epoch_loss = 0.0
+            self.model.train()
             
             # Shuffle data
             rand_idx = torch.randperm(n_train)
             head_device = head[rand_idx].to(config.device)
             relation_device = relation[rand_idx].to(config.device)
             tail_device = tail[rand_idx].to(config.device)
-            
+
+            self.opt.zero_grad(set_to_none=True)
+            batch_idx = 0
+
             # Train without corrupted negatives: DirectAU uses alignment + global uniformity.
             for h_batch, r_batch, t_batch in batch_by_num(
                 self.n_batch,
@@ -217,30 +273,45 @@ class DirectAUKG(BaseModel):
                 tail_device,
                 n_sample=n_train,
             ):
-                
-                self.model.zero_grad()
-                
-                # 1. Calculate Alignment Loss
-                loss_align = self.model.align_loss(h_batch, r_batch, t_batch)
-                
-                # 2. Calculate Uniformity Loss on unique queries (h, r) and unique tails t
-                unique_queries = torch.unique(torch.stack([h_batch, r_batch], dim=1), dim=0)
-                q_batch = self.model.encode_query(unique_queries[:, 0], unique_queries[:, 1])
+                with torch.autocast(
+                    device_type=config.device.type,
+                    dtype=self.amp_dtype,
+                    enabled=self.amp_enabled,
+                ):
+                    # 1. Calculate Alignment Loss
+                    loss_align = self.model.align_loss(h_batch, r_batch, t_batch)
 
-                unique_tails = torch.unique(t_batch)
-                t_batch_unique = self.model.encode_tail(unique_tails)
+                    # 2. Calculate Uniformity Loss on unique queries (h, r) and unique tails t
+                    unique_queries = torch.unique(torch.stack([h_batch, r_batch], dim=1), dim=0)
+                    q_batch = self.model.encode_query(unique_queries[:, 0], unique_queries[:, 1])
 
-                loss_uni_q = self.model.uniformity_loss(q_batch)
-                loss_uni_t = self.model.uniformity_loss(t_batch_unique)
-                loss_uni = 0.5 * (loss_uni_q + loss_uni_t)
-                
-                # 3. Total DirectAU Loss
-                loss = loss_align + (self.model.gamma * loss_uni)
-                
-                loss.backward()
-                self.opt.step()
-                
+                    unique_tails = torch.unique(t_batch)
+                    t_batch_unique = self.model.encode_tail(unique_tails)
+
+                    loss_uni_q = self.model.uniformity_loss(q_batch)
+                    loss_uni_t = self.model.uniformity_loss(t_batch_unique)
+                    loss_uni = 0.5 * (loss_uni_q + loss_uni_t)
+
+                    # 3. Total DirectAU Loss
+                    loss = loss_align + (self.model.gamma * loss_uni)
+
+                loss_for_step = loss / self.grad_accum_steps
+                self.scaler.scale(loss_for_step).backward()
+
+                should_step = ((batch_idx + 1) % self.grad_accum_steps == 0)
+                if should_step:
+                    self.scaler.step(self.opt)
+                    self.scaler.update()
+                    self.opt.zero_grad(set_to_none=True)
+
                 epoch_loss += loss.item() * h_batch.size(0)
+                batch_idx += 1
+
+            # Flush the remainder when number of mini-batches is not divisible by grad_accum_steps.
+            if batch_idx % self.grad_accum_steps != 0:
+                self.scaler.step(self.opt)
+                self.scaler.update()
+                self.opt.zero_grad(set_to_none=True)
 
             avg_loss = epoch_loss / n_train
             logging.info('Epoch %d/%d, Total Loss=%f', epoch + 1, self.n_epoch, avg_loss)

@@ -144,6 +144,12 @@ def build_runtime_config(args: argparse.Namespace) -> None:
 			"max_length": args.direct_max_length,
 			"encode_batch_size": args.direct_encode_batch_size,
 			"compose_mode": args.direct_compose,
+			"amp": True,
+			"amp_dtype": "fp16",
+			"gradient_checkpointing": True,
+			"grad_accum_steps": 4,
+			"freeze_embeddings": True,
+			"freeze_lower_layers": 6,
 		},
 	}
 	config._config = _to_cfg(runtime_cfg)
