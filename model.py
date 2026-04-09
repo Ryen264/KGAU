@@ -36,6 +36,9 @@ class DirectAU_KGModule(BaseModule):
         self.max_length = model_config.get('max_length', 64)
         self.encode_batch_size = model_config.get('encode_batch_size', 64)
         self.temp = model_config.get('temp', 1.0)
+        self.uniformity_max_samples = int(model_config.get('uniformity_max_samples', 0))
+        self.uniformity_chunk_size = max(1, int(model_config.get('uniformity_chunk_size', 256)))
+        self.forward_chunk_size = max(1, int(model_config.get('forward_chunk_size', 65536)))
 
         self.n_entity, self.n_relation = n_entity, n_relation
         self.entity_texts = entity_texts
@@ -159,11 +162,41 @@ class DirectAU_KGModule(BaseModule):
         # Uniformity is undefined for fewer than 2 vectors; keep training stable.
         if x.size(0) < 2:
             return torch.zeros((), device=x.device, dtype=x.dtype)
-        
-        # UNI(x) = log(mean(exp(-2 * ||x_i - x_j||_2^2)))
-        # torch.pdist computes flattened pairwise distances without the zero-diagonals
-        dist_sq = torch.pdist(x, p=2).pow(2)
-        return dist_sq.mul(-2).exp().mean().log()
+
+        # Optional subsampling keeps peak memory predictable for large batches.
+        if self.uniformity_max_samples > 0 and x.size(0) > self.uniformity_max_samples:
+            idx = torch.randperm(x.size(0), device=x.device)[:self.uniformity_max_samples]
+            x = x[idx]
+
+        # UNI(x) = log(mean(exp(-2 * ||x_i - x_j||_2^2))) over i < j
+        # Chunked implementation avoids materializing full O(N^2) pairwise tensors.
+        n = x.size(0)
+        pair_sum = torch.zeros((), device=x.device, dtype=x.dtype)
+        pair_count = 0
+        chunk = self.uniformity_chunk_size
+
+        for i_start in range(0, n, chunk):
+            i_end = min(i_start + chunk, n)
+            xi = x[i_start:i_end]
+            for j_start in range(i_start, n, chunk):
+                j_end = min(j_start + chunk, n)
+                xj = x[j_start:j_end]
+
+                dist_sq = (xi.unsqueeze(1) - xj.unsqueeze(0)).pow(2).sum(dim=-1)
+                weights = torch.exp(-2 * dist_sq)
+
+                if i_start == j_start:
+                    diag = torch.eye(i_end - i_start, device=x.device, dtype=torch.bool)
+                    valid = weights.masked_select(~diag)
+                    pair_sum = pair_sum + valid.sum() * 0.5
+                    pair_count += valid.numel() // 2
+                else:
+                    pair_sum = pair_sum + weights.sum()
+                    pair_count += weights.numel()
+
+        if pair_count == 0:
+            return torch.zeros((), device=x.device, dtype=x.dtype)
+        return torch.log(pair_sum / pair_count)
 
     def forward(self, head: torch.Tensor, relation: torch.Tensor, tail: torch.Tensor) -> torch.Tensor:
         # Inference distance used for scoring in link prediction / triple classification
@@ -183,10 +216,23 @@ class DirectAU_KGModule(BaseModule):
 
         unique_tails, t_inverse = torch.unique(tail_flat, return_inverse=True)
         t_unique_emb = self.encode_tail(unique_tails)
-        t_emb = t_unique_emb[t_inverse]
 
-        dist = (q_emb - t_emb).norm(p=2, dim=-1)
-        return dist.reshape(flat_shape)
+        n_flat = q_inverse.numel()
+        if n_flat <= self.forward_chunk_size:
+            t_emb = t_unique_emb[t_inverse]
+            dist = (q_emb - t_emb).norm(p=2, dim=-1)
+            return dist.reshape(flat_shape)
+
+        # Chunked path avoids materializing huge [n_flat, dim] tensors at once.
+        dist_parts = []
+        for start in range(0, n_flat, self.forward_chunk_size):
+            end = min(start + self.forward_chunk_size, n_flat)
+            q_idx = q_inverse[start:end]
+            t_idx = t_inverse[start:end]
+            q_part = q_unique_emb[q_idx]
+            t_part = t_unique_emb[t_idx]
+            dist_parts.append((q_part - t_part).norm(p=2, dim=-1))
+        return torch.cat(dist_parts, dim=0).reshape(flat_shape)
 
     def dist(self, head: torch.Tensor, relation: torch.Tensor, tail: torch.Tensor) -> torch.Tensor:
         return self.forward(head, relation, tail)
@@ -288,18 +334,29 @@ class DirectAUKG(BaseModel):
                     dtype=self.amp_dtype,
                     enabled=self.amp_enabled,
                 ):
-                    # 1. Calculate Alignment Loss
-                    loss_align = self.model.align_loss(h_batch, r_batch, t_batch)
+                    # 1. Encode once and reuse for both alignment and uniformity to save memory.
+                    q_full = self.model.encode_query(h_batch, r_batch)
+                    t_full = self.model.encode_tail(t_batch)
+                    loss_align = (q_full - t_full).norm(p=2, dim=-1).pow(2).mean()
 
-                    # 2. Calculate Uniformity Loss on unique queries (h, r) and unique tails t
-                    unique_queries = torch.unique(torch.stack([h_batch, r_batch], dim=1), dim=0)
-                    q_batch = self.model.encode_query(unique_queries[:, 0], unique_queries[:, 1])
+                    # 2. Uniformity on unique samples selected from the already encoded batch.
+                    q_pairs = torch.stack([h_batch, r_batch], dim=1)
+                    _, q_inverse = torch.unique(q_pairs, dim=0, return_inverse=True)
+                    q_order = torch.argsort(q_inverse)
+                    q_inv_sorted = q_inverse[q_order]
+                    q_mask = torch.ones_like(q_inv_sorted, dtype=torch.bool)
+                    q_mask[1:] = q_inv_sorted[1:] != q_inv_sorted[:-1]
+                    q_unique = q_full[q_order[q_mask]]
 
-                    unique_tails = torch.unique(t_batch)
-                    t_batch_unique = self.model.encode_tail(unique_tails)
+                    _, t_inverse = torch.unique(t_batch, return_inverse=True)
+                    t_order = torch.argsort(t_inverse)
+                    t_inv_sorted = t_inverse[t_order]
+                    t_mask = torch.ones_like(t_inv_sorted, dtype=torch.bool)
+                    t_mask[1:] = t_inv_sorted[1:] != t_inv_sorted[:-1]
+                    t_unique = t_full[t_order[t_mask]]
 
-                    loss_uni_q = self.model.uniformity_loss(q_batch)
-                    loss_uni_t = self.model.uniformity_loss(t_batch_unique)
+                    loss_uni_q = self.model.uniformity_loss(q_unique)
+                    loss_uni_t = self.model.uniformity_loss(t_unique)
                     loss_uni = 0.5 * (loss_uni_q + loss_uni_t)
 
                     # 3. Total DirectAU Loss

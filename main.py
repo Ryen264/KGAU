@@ -7,6 +7,9 @@ import time
 from dataclasses import dataclass
 from typing import Dict, List, Tuple
 
+# Must be set before first CUDA context initialization.
+os.environ.setdefault("PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:True")
+
 import numpy as np
 import torch
 
@@ -113,7 +116,7 @@ def build_runtime_config(args: argparse.Namespace) -> None:
 	runtime_cfg = {
 		"dataset": args.dataset,
 		"task": "comparison",
-		"test_batch_size": args.test_batch_size,
+		"test_batch_size": min(args.test_batch_size, 1),
 		"log": {
 			"to_file": False,
 			"dump_config": False,
@@ -134,22 +137,25 @@ def build_runtime_config(args: argparse.Namespace) -> None:
 		"DirectAU_KG": {
 			"model_file": "directaukg.pt",
 			"n_epoch": args.direct_n_epoch,
-			"n_batch": args.direct_n_batch,
+			"n_batch": min(args.direct_n_batch, 8),
 			"epoch_per_test": 5,
 			"optimizer": "Adam",
 			"learning_rate": args.direct_lr,
 			"dim": args.dim,
 			"gamma": args.direct_gamma,
 			"encoder_name": args.direct_encoder_name,
-			"max_length": args.direct_max_length,
-			"encode_batch_size": args.direct_encode_batch_size,
+			"max_length": min(args.direct_max_length, 32),
+			"encode_batch_size": min(args.direct_encode_batch_size, 4),
 			"compose_mode": args.direct_compose,
 			"amp": True,
 			"amp_dtype": "fp16",
 			"gradient_checkpointing": True,
-			"grad_accum_steps": 4,
+			"grad_accum_steps": 16,
 			"freeze_embeddings": True,
 			"freeze_lower_layers": 6,
+			"uniformity_max_samples": 64,
+			"uniformity_chunk_size": 128,
+			"forward_chunk_size": 32768,
 		},
 	}
 	config._config = _to_cfg(runtime_cfg)
