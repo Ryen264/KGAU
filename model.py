@@ -319,6 +319,14 @@ class DirectAUKG(BaseModel):
         best_perf = 0.0
         best_epoch = -1
         patience_counter = 0
+        warned_no_grad_step = False
+
+        def _has_any_grad() -> bool:
+            for group in self.opt.param_groups:
+                for param in group['params']:
+                    if param.grad is not None:
+                        return True
+            return False
 
         for epoch in range(self.n_epoch):
             epoch_loss = 0.0
@@ -379,8 +387,15 @@ class DirectAUKG(BaseModel):
 
                 should_step = ((batch_idx + 1) % self.grad_accum_steps == 0)
                 if should_step:
-                    self.scaler.step(self.opt)
-                    self.scaler.update()
+                    if _has_any_grad():
+                        self.scaler.step(self.opt)
+                        self.scaler.update()
+                    elif not warned_no_grad_step:
+                        logging.warning(
+                            'Skipping optimizer step because no gradients were produced. '
+                            'Current freeze settings may freeze all parameters used in forward.'
+                        )
+                        warned_no_grad_step = True
                     self.opt.zero_grad(set_to_none=True)
 
                 epoch_loss += loss.item() * h_batch.size(0)
@@ -388,8 +403,15 @@ class DirectAUKG(BaseModel):
 
             # Flush the remainder when number of mini-batches is not divisible by grad_accum_steps.
             if batch_idx % self.grad_accum_steps != 0:
-                self.scaler.step(self.opt)
-                self.scaler.update()
+                if _has_any_grad():
+                    self.scaler.step(self.opt)
+                    self.scaler.update()
+                elif not warned_no_grad_step:
+                    logging.warning(
+                        'Skipping optimizer step because no gradients were produced. '
+                        'Current freeze settings may freeze all parameters used in forward.'
+                    )
+                    warned_no_grad_step = True
                 self.opt.zero_grad(set_to_none=True)
 
             avg_loss = epoch_loss / n_train

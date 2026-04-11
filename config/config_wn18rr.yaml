@@ -10,14 +10,15 @@ DirectAUKG:
   max_length: 32
   encode_batch_size: 4
   compose_mode: add
-  n_epoch: 10
+  n_epoch: 3
   n_batch: 8
   grad_accum_steps: 16
   amp: true
   amp_dtype: fp16
   gradient_checkpointing: true
-  freeze_embeddings: true
-  freeze_lower_layers: 6
+  freeze_embeddings: false
+  freeze_lower_layers: 4
+  freeze_tail_encoder: false
   uniformity_max_samples: 64
   uniformity_chunk_size: 128
   forward_chunk_size: 32768
