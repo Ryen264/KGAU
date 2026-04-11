@@ -32,7 +32,7 @@ class DirectAU_KGModule(BaseModule):
         self.model_type = 'DirectAU_KG'
 
         self.gamma = model_config.get('gamma', 1.0)  # Weight of the uniformity loss
-        self.encoder_name = model_config.get('encoder_name', 'bert-base-uncased')
+        self.encoder_name = model_config.get('encoder_name', 'sentence-transformers/all-MiniLM-L6-v2')
         self.max_length = model_config.get('max_length', 64)
         self.encode_batch_size = model_config.get('encode_batch_size', 64)
         self.temp = model_config.get('temp', 1.0)
@@ -51,14 +51,16 @@ class DirectAU_KGModule(BaseModule):
         self.use_gradient_checkpointing = model_config.get('gradient_checkpointing', True)
         self.freeze_lower_layers = int(model_config.get('freeze_lower_layers', 0))
         self.freeze_embeddings = bool(model_config.get('freeze_embeddings', False))
+        self.freeze_tail_encoder = bool(model_config.get('freeze_tail_encoder', False))
 
         if self.use_gradient_checkpointing:
             self.hr_encoder.gradient_checkpointing_enable()
-            self.t_encoder.gradient_checkpointing_enable()
+            if not self.freeze_tail_encoder:
+                self.t_encoder.gradient_checkpointing_enable()
             # Required when embeddings are frozen: checkpointed blocks need at least one grad-carrying input.
             if hasattr(self.hr_encoder, 'enable_input_require_grads'):
                 self.hr_encoder.enable_input_require_grads()
-            if hasattr(self.t_encoder, 'enable_input_require_grads'):
+            if (not self.freeze_tail_encoder) and hasattr(self.t_encoder, 'enable_input_require_grads'):
                 self.t_encoder.enable_input_require_grads()
             # Disable KV cache when checkpointing to prevent incompatibilities and extra memory.
             if hasattr(self.hr_encoder.config, 'use_cache'):
@@ -87,6 +89,10 @@ class DirectAU_KGModule(BaseModule):
                 for i in range(n_freeze_t):
                     for param in self.t_encoder.encoder.layer[i].parameters():
                         param.requires_grad = False
+
+        if self.freeze_tail_encoder:
+            for param in self.t_encoder.parameters():
+                param.requires_grad = False
 
         self.dim = self.hr_encoder.config.hidden_size
         self.is_distance_based = True
@@ -125,6 +131,7 @@ class DirectAU_KGModule(BaseModule):
 
     def _encode_single_texts(self, texts: List[str]) -> torch.Tensor:
         outputs = []
+        tail_trainable = any(p.requires_grad for p in self.t_encoder.parameters()) and self.training
         for start in range(0, len(texts), self.encode_batch_size):
             end = start + self.encode_batch_size
             encoded = self.tokenizer(
@@ -135,7 +142,11 @@ class DirectAU_KGModule(BaseModule):
                 return_tensors='pt',
             )
             encoded = {k: v.to(config.device) for k, v in encoded.items()}
-            hidden = self.t_encoder(**encoded).last_hidden_state
+            if tail_trainable:
+                hidden = self.t_encoder(**encoded).last_hidden_state
+            else:
+                with torch.no_grad():
+                    hidden = self.t_encoder(**encoded).last_hidden_state
             pooled = self._mean_pool(hidden, encoded['attention_mask'])
             outputs.append(pooled)
         return torch.cat(outputs, dim=0)
@@ -290,13 +301,14 @@ class DirectAUKG(BaseModel):
 
         logging.info(
             'DirectAUKG memory settings: amp=%s (%s), grad_accum_steps=%d, gradient_checkpointing=%s, '
-            'freeze_embeddings=%s, freeze_lower_layers=%d',
+            'freeze_embeddings=%s, freeze_lower_layers=%d, freeze_tail_encoder=%s',
             self.amp_enabled,
             'fp16' if self.amp_dtype == torch.float16 else 'bf16',
             self.grad_accum_steps,
             self.model.use_gradient_checkpointing,
             self.model.freeze_embeddings,
             self.model.freeze_lower_layers,
+            self.model.freeze_tail_encoder,
         )
 
     def train(self, train_data: Tuple[torch.Tensor, torch.Tensor, torch.Tensor],

@@ -62,7 +62,7 @@ def parse_args() -> argparse.Namespace:
 	parser.add_argument("--direct_n_batch", type=int, default=128, help="Mini-batches per epoch for DirectAUKG.")
 	parser.add_argument("--direct_lr", type=float, default=1e-3, help="Learning rate for DirectAUKG.")
 	parser.add_argument("--direct_gamma", type=float, default=1.0, help="Uniformity loss weight for DirectAUKG.")
-	parser.add_argument("--direct_encoder_name", default="bert-base-uncased", help="HuggingFace encoder name for DirectAUKG bi-encoder towers.")
+	parser.add_argument("--direct_encoder_name", default="sentence-transformers/all-MiniLM-L6-v2", help="Sentence-BERT encoder name for DirectAUKG bi-encoder towers.")
 	parser.add_argument("--direct_max_length", type=int, default=64, help="Max token length for DirectAUKG text encoding.")
 	parser.add_argument("--direct_encode_batch_size", type=int, default=64, help="Tokenizer/encoder micro-batch size for DirectAUKG.")
 	parser.add_argument("--direct_compose", default="mul", choices=["mul", "add"], help="Composition mode for DirectAUKG.")
