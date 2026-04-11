@@ -331,6 +331,7 @@ class DirectAUKG(BaseModel):
         for epoch in range(self.n_epoch):
             epoch_loss = 0.0
             self.model.train()
+            warned_no_grad_step = False
             
             # Shuffle data
             rand_idx = torch.randperm(n_train)
@@ -340,15 +341,16 @@ class DirectAUKG(BaseModel):
 
             self.opt.zero_grad(set_to_none=True)
             batch_idx = 0
+            total_batches = max(1, self.n_batch)
 
             # Train without corrupted negatives: DirectAU uses alignment + global uniformity.
-            for h_batch, r_batch, t_batch in batch_by_num(
+            for batch_idx, (h_batch, r_batch, t_batch) in enumerate(batch_by_num(
                 self.n_batch,
                 head_device,
                 relation_device,
                 tail_device,
                 n_sample=n_train,
-            ):
+            ), start=1):
                 with torch.autocast(
                     device_type=config.device.type,
                     dtype=self.amp_dtype,
@@ -385,33 +387,70 @@ class DirectAUKG(BaseModel):
                 loss_for_step = loss / self.grad_accum_steps
                 self.scaler.scale(loss_for_step).backward()
 
-                should_step = ((batch_idx + 1) % self.grad_accum_steps == 0)
+                should_step = (batch_idx % self.grad_accum_steps == 0)
+                grad_status = 'ACCUM'
                 if should_step:
                     if _has_any_grad():
                         self.scaler.step(self.opt)
                         self.scaler.update()
+                        grad_status = 'STEP'
                     elif not warned_no_grad_step:
                         logging.warning(
                             'Skipping optimizer step because no gradients were produced. '
                             'Current freeze settings may freeze all parameters used in forward.'
                         )
                         warned_no_grad_step = True
+                        grad_status = 'STEP_SKIPPED'
+                    else:
+                        grad_status = 'STEP_SKIPPED'
                     self.opt.zero_grad(set_to_none=True)
 
                 epoch_loss += loss.item() * h_batch.size(0)
-                batch_idx += 1
+
+                progress_ratio = batch_idx / total_batches
+                bar_width = 24
+                filled = int(progress_ratio * bar_width)
+                bar = ('#' * filled) + ('-' * (bar_width - filled))
+                accum_pos = ((batch_idx - 1) % self.grad_accum_steps) + 1
+                logging.info(
+                    'Epoch %d/%d [%s] batch %d/%d | samples=%d | loss=%.6f | grad=%s (%d/%d)',
+                    epoch + 1,
+                    self.n_epoch,
+                    bar,
+                    batch_idx,
+                    total_batches,
+                    h_batch.size(0),
+                    loss.item(),
+                    grad_status,
+                    accum_pos,
+                    self.grad_accum_steps,
+                )
 
             # Flush the remainder when number of mini-batches is not divisible by grad_accum_steps.
             if batch_idx % self.grad_accum_steps != 0:
                 if _has_any_grad():
                     self.scaler.step(self.opt)
                     self.scaler.update()
+                    logging.info(
+                        'Epoch %d/%d flush step after batch %d/%d | grad=STEP',
+                        epoch + 1,
+                        self.n_epoch,
+                        batch_idx,
+                        total_batches,
+                    )
                 elif not warned_no_grad_step:
                     logging.warning(
                         'Skipping optimizer step because no gradients were produced. '
                         'Current freeze settings may freeze all parameters used in forward.'
                     )
                     warned_no_grad_step = True
+                    logging.info(
+                        'Epoch %d/%d flush step after batch %d/%d | grad=STEP_SKIPPED',
+                        epoch + 1,
+                        self.n_epoch,
+                        batch_idx,
+                        total_batches,
+                    )
                 self.opt.zero_grad(set_to_none=True)
 
             avg_loss = epoch_loss / n_train

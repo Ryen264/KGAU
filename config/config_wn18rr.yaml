@@ -10,9 +10,9 @@ DirectAUKG:
   max_length: 32
   encode_batch_size: 4
   compose_mode: add
-  n_epoch: 3
-  n_batch: 8
-  grad_accum_steps: 16
+  n_epoch: 1
+  n_batch: 85
+  grad_accum_steps: 2
   amp: true
   amp_dtype: fp16
   gradient_checkpointing: true
@@ -22,7 +22,7 @@ DirectAUKG:
   uniformity_max_samples: 64
   uniformity_chunk_size: 128
   forward_chunk_size: 32768
-  epoch_per_test: 50
+  epoch_per_test: 1
   model_file: DirectAUKG.mdl
 TransE:
   optimizer: Adagrad
