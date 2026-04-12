@@ -1,4 +1,4 @@
-test_batch_size: 256
+test_batch_size: 32
 dataset: wn18rr
 task: all
 DirectAUKG:

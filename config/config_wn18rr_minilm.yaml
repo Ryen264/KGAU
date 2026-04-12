@@ -1,4 +1,4 @@
-test_batch_size: 256
+test_batch_size: 32
 dataset: wn18rr
 task: all
 DirectAUKG:
@@ -22,7 +22,7 @@ DirectAUKG:
   uniformity_max_samples: 128
   uniformity_chunk_size: 128
   forward_chunk_size: 32768
-  epoch_per_test: 5
+  epoch_per_test: 1
   model_file: DirectAUKG.mdl
 TransE:
   optimizer: Adagrad

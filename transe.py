@@ -3,7 +3,7 @@ import torch.nn as nn
 import logging
 import os
 from typing import Tuple
-from torch.optim import Adam, SGD, Adagrad, RMSprop
+from torch.optim import Adam, AdamW, SGD, Adagrad, RMSprop
 
 import config
 from base_model import BaseModule, BaseModel
@@ -11,6 +11,7 @@ from datasets import batch_by_num
 
 OPTIMIZER_MAP = {
     'Adam': Adam,
+    'AdamW': AdamW,
     'SGD': SGD,
     'Adagrad': Adagrad,
     'RMSprop': RMSprop,

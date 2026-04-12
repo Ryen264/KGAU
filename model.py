@@ -2,16 +2,18 @@ import torch
 import torch.nn as nn
 import logging
 import os
-from typing import List, Tuple
-from torch.optim import Adam, SGD, Adagrad, RMSprop
+from typing import Dict, List, Tuple
+from torch.optim import Adam, AdamW, SGD, Adagrad, RMSprop
 from transformers import AutoModel, AutoTokenizer
 
 import config
-from base_model import BaseModule, BaseModel
+from base_model import BaseModule, BaseModel, FILTER_RANKING_PENALTY
 from datasets import batch_by_num
+from metrics import ranking_metrics
 
 OPTIMIZER_MAP = {
     'Adam': Adam,
+    'AdamW': AdamW,
     'SGD': SGD,
     'Adagrad': Adagrad,
     'RMSprop': RMSprop,
@@ -156,6 +158,15 @@ class DirectAU_KGModule(BaseModule):
         relation_texts = self._ids_to_texts(relation, self.relation_texts)
         q_raw = self._encode_text_pairs(head_texts, relation_texts)
         return self._normalize(q_raw)
+
+    def encode_query_with_relation_texts(self, entities: torch.Tensor, relation_texts: List[str]) -> torch.Tensor:
+        entity_texts = self._ids_to_texts(entities, self.entity_texts)
+        q_raw = self._encode_text_pairs(entity_texts, relation_texts)
+        return self._normalize(q_raw)
+
+    def relation_ids_to_inverse_texts(self, relation: torch.Tensor) -> List[str]:
+        rel_texts = self._ids_to_texts(relation, self.relation_texts)
+        return [f"inverse {text}".strip() for text in rel_texts]
 
     def encode_tail(self, tail: torch.Tensor) -> torch.Tensor:
         tail_texts = self._ids_to_texts(tail, self.entity_texts)
@@ -480,3 +491,104 @@ class DirectAUKG(BaseModel):
 
         self.load(self.model_path)
         return best_perf, best_epoch
+
+    def test_link(self, test_data: list, heads: dict, tails: dict, filt: bool=True, k_list: list=[1, 3, 10]) -> dict:
+        self.model.eval()
+
+        test_data_no_label = test_data[:3]
+        n_eval = len(test_data_no_label[0])
+        total_batches = max(1, (n_eval + self.test_batch_size - 1) // self.test_batch_size)
+
+        mr_total = 0.0
+        mrr_total = 0.0
+        hits_total = [0] * len(k_list)
+        count = 0
+
+        with torch.no_grad():
+            # SimKGC-style precompute: encode all entity texts once with MiniLM tail tower.
+            all_entity_ids = torch.arange(self.n_entity, device=config.device)
+            entity_matrix = self.model.encode_tail(all_entity_ids)
+
+            for batch_idx, (batch_head, batch_relation, batch_tail) in enumerate(
+                batch_by_num(total_batches, *test_data_no_label, n_sample=n_eval),
+                start=1,
+            ):
+                if batch_head.numel() == 0:
+                    continue
+
+                head_device = batch_head.to(config.device)
+                relation_device = batch_relation.to(config.device)
+                tail_device = batch_tail.to(config.device)
+
+                # Tail query: (h, r, ?)
+                q_tail = self.model.encode_query(head_device, relation_device)
+                tail_scores = -(q_tail @ entity_matrix.t())
+
+                # Head query via inverse relation: (?, r, t) -> (t, r^{-1}, ?)
+                inv_relation_texts = self.model.relation_ids_to_inverse_texts(relation_device)
+                q_head = self.model.encode_query_with_relation_texts(tail_device, inv_relation_texts)
+                head_scores = -(q_head @ entity_matrix.t())
+
+                for i in range(batch_head.size(0)):
+                    head_id = int(batch_head[i].item())
+                    relation_id = int(batch_relation[i].item())
+                    tail_id = int(batch_tail[i].item())
+
+                    tail_scores_i = tail_scores[i].clone()
+                    head_scores_i = head_scores[i].clone()
+
+                    if filt:
+                        tail_key = (head_id, relation_id)
+                        if tail_key in tails and tails[tail_key]._nnz() > 1:
+                            target_tail_score = tail_scores_i[tail_id].item()
+                            tail_scores_i += tails[tail_key].to(config.device) * FILTER_RANKING_PENALTY
+                            tail_scores_i[tail_id] = target_tail_score
+
+                        head_key = (tail_id, relation_id)
+                        if head_key in heads and heads[head_key]._nnz() > 1:
+                            target_head_score = head_scores_i[head_id].item()
+                            head_scores_i += heads[head_key].to(config.device) * FILTER_RANKING_PENALTY
+                            head_scores_i[head_id] = target_head_score
+
+                    tail_metrics = ranking_metrics(tail_scores_i, tail_id, k_list=k_list)
+                    head_metrics = ranking_metrics(head_scores_i, head_id, k_list=k_list)
+
+                    mr_total += tail_metrics['mr'] + head_metrics['mr']
+                    mrr_total += tail_metrics['mrr'] + head_metrics['mrr']
+                    hits_total = [
+                        hits_total[j] + tail_metrics['hits'][j] + head_metrics['hits'][j]
+                        for j in range(len(k_list))
+                    ]
+                    count += 2
+
+                progress_ratio = batch_idx / total_batches
+                bar_width = 24
+                filled = int(progress_ratio * bar_width)
+                bar = ('#' * filled) + ('-' * (bar_width - filled))
+                logging.info(
+                    'Eval [%s] batch %d/%d | triples=%d | queries=%d',
+                    bar,
+                    batch_idx,
+                    total_batches,
+                    batch_head.size(0),
+                    batch_head.size(0) * 2,
+                )
+
+        mr_rate = mr_total / count
+        mrr_rate = mrr_total / count
+        hits_rate = [hit_total / count for hit_total in hits_total]
+
+        metrics: Dict[str, float] = {
+            'mr': mr_rate,
+            'mrr': mrr_rate,
+        }
+        for i in range(len(k_list)):
+            metrics[f'hit@{k_list[i]}'] = hits_rate[i]
+
+        parts = []
+        label_map = {'mr': 'MR', 'mrr': 'MRR'}
+        for key, value in metrics.items():
+            label = label_map.get(key, key.replace('hit@', 'Hit@'))
+            parts.append(f"{label}: {value:.4f}")
+        logging.info('Ranking metrics (head+tail): %s', ', '.join(parts))
+        return metrics
