@@ -5,25 +5,25 @@ DirectAUKG:
   optimizer: Adagrad
   learning_rate: 0.01
   dim: 50
-  gamma: 1.0
+  gamma: 0.0
   encoder_name: sentence-transformers/all-MiniLM-L6-v2
-  max_length: 32
-  encode_batch_size: 4
+  max_length: 16
+  encode_batch_size: 16
   compose_mode: add
   n_epoch: 1
-  n_batch: 85
-  grad_accum_steps: 2
+  n_batch: 16
+  grad_accum_steps: 1
   amp: true
   amp_dtype: fp16
   gradient_checkpointing: true
   freeze_embeddings: false
-  freeze_lower_layers: 4
-  freeze_tail_encoder: false
-  uniformity_max_samples: 64
-  uniformity_chunk_size: 128
+  freeze_lower_layers: 8
+  freeze_tail_encoder: true
+  uniformity_max_samples: 32
+  uniformity_chunk_size: 64
   forward_chunk_size: 32768
-  epoch_per_test: 5
-  model_file: DirectAUKG.mdl
+  epoch_per_test: 1
+  model_file: DirectAUKG_quick.mdl
 TransE:
   optimizer: Adagrad
   learning_rate: 0.01
@@ -31,10 +31,10 @@ TransE:
   margin: 3
   p: 1
   temp: 1
-  n_epoch: 1000
-  n_batch: 100
-  epoch_per_test: 50
-  model_file: TransE.mdl
+  n_epoch: 1
+  n_batch: 8
+  epoch_per_test: 10
+  model_file: TransE_quick.mdl
 log:
   dump_config: false
   to_file: true

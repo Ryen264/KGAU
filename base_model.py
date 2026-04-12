@@ -189,8 +189,13 @@ class BaseModel(object):
         hits_total = [0] * len(k_list)
         test_data_no_label = test_data[:3]
         count = 0
+        n_eval = len(test_data_no_label[0])
+        total_batches = max(1, (n_eval + self.test_batch_size - 1) // self.test_batch_size)
         with torch.no_grad():
-            for batch_head, batch_relation, batch_tail in batch_by_size(self.test_batch_size, *test_data_no_label):
+            for batch_idx, (batch_head, batch_relation, batch_tail) in enumerate(
+                batch_by_size(self.test_batch_size, *test_data_no_label),
+                start=1,
+            ):
                 batch_size = batch_head.size(0)
 
                 head_var = batch_head.unsqueeze(1).expand(batch_size, self.n_entity).to(config.device)
@@ -234,6 +239,18 @@ class BaseModel(object):
                     mrr_total += (head_mrr + tail_mrr)
                     hits_total = [(hits_total[i] + head_hits[i] + tail_hits[i]) for i in range(len(k_list))]
                     count += 2
+
+                progress_ratio = batch_idx / total_batches
+                bar_width = 24
+                filled = int(progress_ratio * bar_width)
+                bar = ('#' * filled) + ('-' * (bar_width - filled))
+                logging.info(
+                    'Eval [%s] batch %d/%d | samples=%d',
+                    bar,
+                    batch_idx,
+                    total_batches,
+                    batch_size,
+                )
                     
         mr_rate = mr_total / count
         mrr_rate = mrr_total / count

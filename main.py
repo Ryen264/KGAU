@@ -17,7 +17,6 @@ import config
 from data_loader import graph_size, index_entity_relation, read_data
 from datasets import BernCorrupter, sparse_heads_tails
 from model import DirectAUKG
-from transe import TransE
 
 
 @dataclass
@@ -26,7 +25,6 @@ class ExperimentResult:
 	best_valid_mrr: float
 	best_epoch: int
 	link_metrics: Dict[str, float]
-	cls_metrics: Dict[str, float]
 
 
 def parse_args() -> argparse.Namespace:
@@ -47,9 +45,15 @@ def parse_args() -> argparse.Namespace:
 	parser.add_argument("--seed", type=int, default=42, help="Random seed.")
 	parser.add_argument("--gpu", type=int, default=None, help="GPU id. If not set, auto-select.")
 	parser.add_argument("--early_stop_patience", type=int, default=-1, help="Early stopping patience. -1 disables it.")
+	parser.add_argument(
+		"--quick_eval_samples",
+		type=int,
+		default=1024,
+		help="Number of validation triples used for quick sanity-check eval during training. <=0 means full valid set.",
+	)
 
 	parser.add_argument("--dim", type=int, default=200, help="Embedding dimension.")
-	parser.add_argument("--test_batch_size", type=int, default=256, help="Batch size for evaluation.")
+	parser.add_argument("--test_batch_size", type=int, default=32, help="Batch size for evaluation.")
 
 	parser.add_argument("--transe_n_epoch", type=int, default=200, help="Epochs for TransE.")
 	parser.add_argument("--transe_n_batch", type=int, default=128, help="Mini-batches per epoch for TransE.")
@@ -116,7 +120,7 @@ def build_runtime_config(args: argparse.Namespace) -> None:
 	runtime_cfg = {
 		"dataset": args.dataset,
 		"task": "comparison",
-		"test_batch_size": min(args.test_batch_size, 1),
+		"test_batch_size": max(1, args.test_batch_size),
 		"log": {
 			"to_file": False,
 			"dump_config": False,
@@ -183,13 +187,10 @@ def load_config(args: argparse.Namespace) -> None:
 
 def build_paths(args: argparse.Namespace) -> Dict[str, str]:
 	base_dir = os.path.join(args.data_root, args.dataset)
-	labeled_dir = os.path.join(args.data_root, f"{args.dataset}_w_labels")
 	return {
 		"train": os.path.join(base_dir, "train.txt"),
 		"valid": os.path.join(base_dir, "valid.txt"),
 		"test": os.path.join(base_dir, "test.txt"),
-		"valid_cls": os.path.join(labeled_dir, "valid.txt"),
-		"test_cls": os.path.join(labeled_dir, "test.txt"),
 	}
 
 
@@ -237,35 +238,42 @@ def to_tensor_triplets(data: Tuple[list, list, list]) -> Tuple[torch.Tensor, tor
 	return torch.LongTensor(h), torch.LongTensor(r), torch.LongTensor(t)
 
 
-def to_tensor_quadruples(data: Tuple[list, list, list, list]) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
-	h, r, t, y = data
-	return torch.LongTensor(h), torch.LongTensor(r), torch.LongTensor(t), torch.LongTensor(y)
-
-
 def train_and_evaluate(
 	model_name: str,
 	model,
 	train_triplets: Tuple[torch.Tensor, torch.Tensor, torch.Tensor],
 	valid_triplets: Tuple[torch.Tensor, torch.Tensor, torch.Tensor],
 	test_triplets: Tuple[torch.Tensor, torch.Tensor, torch.Tensor],
-	valid_cls: Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor],
-	test_cls: Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor],
 	n_entity: int,
 	early_stop_patience: int,
+	quick_eval_samples: int,
 ) -> ExperimentResult:
-	train_lists = tuple(x.tolist() for x in train_triplets)
-	valid_lists = tuple(x.tolist() for x in valid_triplets)
-	test_lists = tuple(x.tolist() for x in test_triplets)
+	def _sample_triplets(
+		triplets: Tuple[torch.Tensor, torch.Tensor, torch.Tensor],
+		n_samples: int,
+	) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+		head, relation, tail = triplets
+		total = head.size(0)
+		if n_samples <= 0 or n_samples >= total:
+			return triplets
+		idx = torch.randperm(total)[:n_samples]
+		return head[idx], relation[idx], tail[idx]
 
-	eval_heads_valid, eval_tails_valid = sparse_heads_tails(n_entity, train_lists, valid_lists, None)
-	eval_heads_test, eval_tails_test = sparse_heads_tails(n_entity, train_lists, valid_lists, test_lists)
+	train_lists = tuple(x.tolist() for x in train_triplets)
+	valid_quick_triplets = _sample_triplets(valid_triplets, quick_eval_samples)
+	valid_quick_lists = tuple(x.tolist() for x in valid_quick_triplets)
+	test_lists = tuple(x.tolist() for x in test_triplets)
+	valid_full_lists = tuple(x.tolist() for x in valid_triplets)
+
+	eval_heads_valid, eval_tails_valid = sparse_heads_tails(n_entity, train_lists, valid_quick_lists, None)
+	eval_heads_test, eval_tails_test = sparse_heads_tails(n_entity, train_lists, valid_full_lists, test_lists)
 
 	corrupter = None
 	if getattr(model, "uses_negative_sampling", True):
 		corrupter = BernCorrupter(train_lists, n_entity, model.n_relation)
 
 	def valid_link_tester() -> float:
-		valid_metrics = model.test_link(valid_triplets, eval_heads_valid, eval_tails_valid, filt=True)
+		valid_metrics = model.test_link(valid_quick_triplets, eval_heads_valid, eval_tails_valid, filt=True)
 		return float(valid_metrics["mrr"])
 
 	best_valid_mrr, best_epoch = model.train(
@@ -275,24 +283,18 @@ def train_and_evaluate(
 		early_stop_patience=early_stop_patience,
 	)
 
+	# Full evaluation is run only once after training is complete.
 	link_metrics = model.test_link(test_triplets, eval_heads_test, eval_tails_test, filt=True)
-
-	val_h, val_r, val_t, val_y = valid_cls
-	thresholds = model.find_thresholds(val_h, val_r, val_t, val_y)
-
-	test_h, test_r, test_t, test_y = test_cls
-	cls_metrics = model.test_classification(test_h, test_r, test_t, test_y, thresholds)
 
 	return ExperimentResult(
 		model_name=model_name,
 		best_valid_mrr=best_valid_mrr,
 		best_epoch=best_epoch,
 		link_metrics=link_metrics,
-		cls_metrics=cls_metrics,
 	)
 
 
-def print_summary(results: Tuple[ExperimentResult, ExperimentResult]) -> None:
+def print_summary(results: Tuple[ExperimentResult, ...]) -> None:
 	lines = ["", "=== Comparison On WN18RR ==="]
 	for res in results:
 		lines.append("")
@@ -305,15 +307,6 @@ def print_summary(results: Tuple[ExperimentResult, ExperimentResult]) -> None:
 			f"Hit@1={res.link_metrics['hit@1']:.4f}, "
 			f"Hit@3={res.link_metrics['hit@3']:.4f}, "
 			f"Hit@10={res.link_metrics['hit@10']:.4f}"
-		)
-		lines.append(
-			"Triple Classification (test): "
-			f"Acc={res.cls_metrics['accuracy']:.4f}, "
-			f"Prec={res.cls_metrics['precision']:.4f}, "
-			f"Rec={res.cls_metrics['recall']:.4f}, "
-			f"F1={res.cls_metrics['f1']:.4f}, "
-			f"PR-AUC={res.cls_metrics['pr_auc']:.4f}, "
-			f"ROC-AUC={res.cls_metrics['roc_auc']:.4f}"
 		)
 
 	for line in lines:
@@ -340,8 +333,6 @@ def main() -> None:
 		paths["train"],
 		paths["valid"],
 		paths["test"],
-		paths["valid_cls"],
-		paths["test_cls"],
 	)
 	n_entity, n_relation = graph_size(kb_index)
 	logging.info("Graph size: n_entity=%d, n_relation=%d", n_entity, n_relation)
@@ -350,11 +341,8 @@ def main() -> None:
 	train_triplets = to_tensor_triplets(read_data(paths["train"], kb_index))
 	valid_triplets = to_tensor_triplets(read_data(paths["valid"], kb_index))
 	test_triplets = to_tensor_triplets(read_data(paths["test"], kb_index))
-	valid_cls = to_tensor_quadruples(read_data(paths["valid_cls"], kb_index, with_label=True))
-	test_cls = to_tensor_quadruples(read_data(paths["test_cls"], kb_index, with_label=True))
 
 	direct_model = DirectAUKG(n_entity, n_relation, entity_texts, relation_texts)
-	transe_model = TransE(n_entity, n_relation)
 
 	direct_result = train_and_evaluate(
 		model_name="DirectAUKG",
@@ -362,25 +350,12 @@ def main() -> None:
 		train_triplets=train_triplets,
 		valid_triplets=valid_triplets,
 		test_triplets=test_triplets,
-		valid_cls=valid_cls,
-		test_cls=test_cls,
 		n_entity=n_entity,
 		early_stop_patience=args.early_stop_patience,
+		quick_eval_samples=args.quick_eval_samples,
 	)
 
-	transe_result = train_and_evaluate(
-		model_name="TransE",
-		model=transe_model,
-		train_triplets=train_triplets,
-		valid_triplets=valid_triplets,
-		test_triplets=test_triplets,
-		valid_cls=valid_cls,
-		test_cls=test_cls,
-		n_entity=n_entity,
-		early_stop_patience=args.early_stop_patience,
-	)
-
-	print_summary((direct_result, transe_result))
+	print_summary((direct_result,))
 
 
 if __name__ == "__main__":

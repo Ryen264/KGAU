@@ -470,6 +470,13 @@ class DirectAUKG(BaseModel):
             if (early_stop_patience > 0 and patience_counter >= early_stop_patience):
                 logging.info('Early stopping triggered at epoch %d (patience=%d)', epoch + 1, early_stop_patience)
                 break
-                
+
+        # If no validation checkpoint was produced (e.g., sparse eval cadence),
+        # persist the current weights so load() below always has a valid target.
+        if best_epoch < 0:
+            self.save()
+            best_epoch = self.n_epoch
+            best_perf = float('nan')
+
         self.load(self.model_path)
         return best_perf, best_epoch
