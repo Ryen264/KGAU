@@ -200,45 +200,30 @@ class BaseModel(object):
 
                 head_var = batch_head.unsqueeze(1).expand(batch_size, self.n_entity).to(config.device)
                 relation_var = batch_relation.unsqueeze(1).expand(batch_size, self.n_entity).to(config.device)
-                tail_var = batch_tail.unsqueeze(1).expand(batch_size, self.n_entity).to(config.device)
                 all_var = torch.arange(0, self.n_entity).unsqueeze(0).expand(batch_size, self.n_entity).long().to(config.device)
 
-                batch_head_scores = self.model.score(all_var, relation_var, tail_var)
                 batch_tail_scores = self.model.score(head_var, relation_var, all_var)
-            
-                batch_head_scores = batch_head_scores.detach()
                 batch_tail_scores = batch_tail_scores.detach()
 
-                for head, relation, tail, head_scores, tail_scores in zip(batch_head, batch_relation, batch_tail, batch_head_scores, batch_tail_scores):
+                for head, relation, tail, tail_scores in zip(batch_head, batch_relation, batch_tail, batch_tail_scores):
                     head_id, relation_id, tail_id = head.item(), relation.item(), tail.item()
                     if filt:
-                        key_head = (tail_id, relation_id)
-                        if key_head in heads and heads[key_head]._nnz() > 1:
-                            tmp = head_scores[head_id].item()
-                            head_scores += heads[key_head].to(config.device) * FILTER_RANKING_PENALTY
-                            head_scores[head_id] = tmp
-                            
                         key_tail = (head_id, relation_id)
                         if key_tail in tails and tails[key_tail]._nnz() > 1:
                             tmp = tail_scores[tail_id].item()
                             tail_scores += tails[key_tail].to(config.device) * FILTER_RANKING_PENALTY
                             tail_scores[tail_id] = tmp
 
-                    head_metrics = ranking_metrics(head_scores, head_id, k_list=k_list)
                     tail_metrics = ranking_metrics(tail_scores, tail_id, k_list=k_list)
-
-                    head_mr = head_metrics['mr']
-                    head_mrr = head_metrics['mrr']
-                    head_hits = head_metrics['hits']
 
                     tail_mr = tail_metrics['mr']
                     tail_mrr = tail_metrics['mrr']
                     tail_hits = tail_metrics['hits']
 
-                    mr_total += (head_mr + tail_mr)
-                    mrr_total += (head_mrr + tail_mrr)
-                    hits_total = [(hits_total[i] + head_hits[i] + tail_hits[i]) for i in range(len(k_list))]
-                    count += 2
+                    mr_total += tail_mr
+                    mrr_total += tail_mrr
+                    hits_total = [(hits_total[i] + tail_hits[i]) for i in range(len(k_list))]
+                    count += 1
 
                 progress_ratio = batch_idx / total_batches
                 bar_width = 24
