@@ -8,9 +8,9 @@ DirectAUKG:
   gamma: 1.0
   encoder_name: sentence-transformers/all-MiniLM-L6-v2
   max_length: 32
-  encode_batch_size: 12
+  encode_batch_size: 14
   compose_mode: add
-  n_epoch: 10
+  n_epoch: 30
   n_batch: 512
   grad_accum_steps: 1
   amp: true
@@ -19,7 +19,7 @@ DirectAUKG:
   freeze_embeddings: false
   freeze_lower_layers: 0
   freeze_tail_encoder: false
-  uniformity_max_samples: 256
+  uniformity_max_samples: 170 
   uniformity_chunk_size: 128
   forward_chunk_size: 32768
   epoch_per_test: 10

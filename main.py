@@ -45,6 +45,7 @@ def parse_args() -> argparse.Namespace:
 	parser.add_argument("--no_log_to_file", action="store_true", help="Disable writing logs to file.")
 	parser.add_argument("--seed", type=int, default=42, help="Random seed.")
 	parser.add_argument("--gpu", type=int, default=None, help="GPU id. If not set, auto-select.")
+	parser.add_argument("--resume_checkpoint", default="", help="Path to a training checkpoint to resume DirectAUKG training.")
 	parser.add_argument("--early_stop_patience", type=int, default=-1, help="Early stopping patience. -1 disables it.")
 	parser.add_argument(
 		"--quick_eval_samples",
@@ -187,6 +188,10 @@ def load_config(args: argparse.Namespace) -> None:
 			args.dataset = cfg["dataset"]
 		if "test_batch_size" not in cfg:
 			cfg["test_batch_size"] = args.test_batch_size
+
+		if not args.resume_checkpoint:
+			direct_cfg = cfg.get("DirectAU_KG") or cfg.get("DirectAUKG") or {}
+			args.resume_checkpoint = str(direct_cfg.get("resume_checkpoint", "")).strip()
 	else:
 		logging.warning("Config file not found at %s. Falling back to runtime defaults.", args.config)
 		build_runtime_config(args)
@@ -264,6 +269,7 @@ def train_and_evaluate(
 	early_stop_patience: int,
 	quick_eval_samples: int,
 	cls_n_thresholds: int,
+	resume_checkpoint: str,
 ) -> ExperimentResult:
 	def _sample_triplets(
 		triplets: Tuple[torch.Tensor, torch.Tensor, torch.Tensor],
@@ -365,6 +371,7 @@ def train_and_evaluate(
 		valid_epoch_tester,
 		test_tester=test_epoch_tester,
 		early_stop_patience=early_stop_patience,
+		resume_checkpoint=resume_checkpoint,
 	)
 
 	# Full evaluation is run only once after training is complete.
@@ -481,6 +488,7 @@ def main() -> None:
 		early_stop_patience=args.early_stop_patience,
 		quick_eval_samples=args.quick_eval_samples,
 		cls_n_thresholds=args.cls_n_thresholds,
+		resume_checkpoint=args.resume_checkpoint,
 	)
 
 	print_summary((direct_result,))

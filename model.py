@@ -2,7 +2,7 @@ import torch
 import torch.nn as nn
 import logging
 import os
-from typing import Dict, List, Tuple
+from typing import Dict, List, Optional, Tuple
 from torch.optim import Adam, AdamW, SGD, Adagrad, RMSprop
 from transformers import AutoModel, AutoTokenizer
 
@@ -322,6 +322,45 @@ class DirectAUKG(BaseModel):
             self.model.freeze_tail_encoder,
         )
 
+    def _load_training_state(self, checkpoint_path: str) -> tuple[int, float, int, int]:
+        checkpoint = torch.load(checkpoint_path, map_location=config.device)
+
+        # Backward compatibility: allow loading a plain model state_dict file.
+        if isinstance(checkpoint, dict) and 'model_state_dict' in checkpoint:
+            self.model.load_state_dict(checkpoint['model_state_dict'])
+            if 'optimizer_state_dict' in checkpoint and self.opt is not None:
+                self.opt.load_state_dict(checkpoint['optimizer_state_dict'])
+            if 'scaler_state_dict' in checkpoint and self.scaler is not None:
+                self.scaler.load_state_dict(checkpoint['scaler_state_dict'])
+
+            start_epoch = int(checkpoint.get('epoch', 0))
+            best_perf = float(checkpoint.get('best_perf', 0.0))
+            best_epoch = int(checkpoint.get('best_epoch', -1))
+            patience_counter = int(checkpoint.get('patience_counter', 0))
+            return start_epoch, best_perf, best_epoch, patience_counter
+
+        self.model.load_state_dict(checkpoint)
+        return 0, 0.0, -1, 0
+
+    def _save_training_state(
+        self,
+        checkpoint_path: str,
+        epoch: int,
+        best_perf: float,
+        best_epoch: int,
+        patience_counter: int,
+    ) -> None:
+        state = {
+            'epoch': int(epoch),
+            'best_perf': float(best_perf),
+            'best_epoch': int(best_epoch),
+            'patience_counter': int(patience_counter),
+            'model_state_dict': self.model.state_dict(),
+            'optimizer_state_dict': self.opt.state_dict() if self.opt is not None else None,
+            'scaler_state_dict': self.scaler.state_dict() if self.scaler is not None else None,
+        }
+        torch.save(state, checkpoint_path)
+
     def train(
         self,
         train_data: Tuple[torch.Tensor, torch.Tensor, torch.Tensor],
@@ -329,6 +368,7 @@ class DirectAUKG(BaseModel):
         valid_tester,
         test_tester=None,
         early_stop_patience: int=-1,
+        resume_checkpoint: Optional[str]=None,
     ) -> tuple[float, int]:
         
         head, relation, tail = train_data
@@ -336,7 +376,28 @@ class DirectAUKG(BaseModel):
         best_perf = 0.0
         best_epoch = -1
         patience_counter = 0
+        start_epoch = 0
         warned_no_grad_step = False
+
+        checkpoint_path = resume_checkpoint or str(self.model_config.get('resume_checkpoint', '')).strip()
+        save_training_state = bool(checkpoint_path)
+        if checkpoint_path:
+            if os.path.exists(checkpoint_path):
+                start_epoch, best_perf, best_epoch, patience_counter = self._load_training_state(checkpoint_path)
+                logging.info(
+                    'Resumed DirectAUKG from checkpoint %s at epoch %d/%d (best_mrr=%.6f, best_epoch=%d, patience=%d).',
+                    checkpoint_path,
+                    start_epoch,
+                    self.n_epoch,
+                    best_perf,
+                    best_epoch,
+                    patience_counter,
+                )
+            else:
+                logging.warning(
+                    'Resume checkpoint not found: %s. Training starts from scratch and will create this checkpoint.',
+                    checkpoint_path,
+                )
 
         def _has_any_grad() -> bool:
             for group in self.opt.param_groups:
@@ -345,7 +406,7 @@ class DirectAUKG(BaseModel):
                         return True
             return False
 
-        for epoch in range(self.n_epoch):
+        for epoch in range(start_epoch, self.n_epoch):
             epoch_loss = 0.0
             self.model.train()
             warned_no_grad_step = False
@@ -373,20 +434,12 @@ class DirectAUKG(BaseModel):
                     dtype=self.amp_dtype,
                     enabled=self.amp_enabled,
                 ):
-                    # 1. Encode once and reuse for both alignment and uniformity to save memory.
+                    # 1. Encode once and reuse for alignment + tail-only uniformity.
                     q_full = self.model.encode_query(h_batch, r_batch)
                     t_full = self.model.encode_tail(t_batch)
                     loss_align = (q_full - t_full).norm(p=2, dim=-1).pow(2).mean()
 
-                    # 2. Uniformity on unique samples selected from the already encoded batch.
-                    q_pairs = torch.stack([h_batch, r_batch], dim=1)
-                    _, q_inverse = torch.unique(q_pairs, dim=0, return_inverse=True)
-                    q_order = torch.argsort(q_inverse)
-                    q_inv_sorted = q_inverse[q_order]
-                    q_mask = torch.ones_like(q_inv_sorted, dtype=torch.bool)
-                    q_mask[1:] = q_inv_sorted[1:] != q_inv_sorted[:-1]
-                    q_unique = q_full[q_order[q_mask]]
-
+                    # 2. Uniformity only on unique tail samples from the encoded batch.
                     _, t_inverse = torch.unique(t_batch, return_inverse=True)
                     t_order = torch.argsort(t_inverse)
                     t_inv_sorted = t_inverse[t_order]
@@ -394,9 +447,8 @@ class DirectAUKG(BaseModel):
                     t_mask[1:] = t_inv_sorted[1:] != t_inv_sorted[:-1]
                     t_unique = t_full[t_order[t_mask]]
 
-                    loss_uni_q = self.model.uniformity_loss(q_unique)
                     loss_uni_t = self.model.uniformity_loss(t_unique)
-                    loss_uni = 0.5 * (loss_uni_q + loss_uni_t)
+                    loss_uni = loss_uni_t
 
                     # 3. Total DirectAU Loss
                     loss = loss_align + (self.model.gamma * loss_uni)
@@ -494,6 +546,15 @@ class DirectAUKG(BaseModel):
             if (early_stop_patience > 0 and patience_counter >= early_stop_patience):
                 logging.info('Early stopping triggered at epoch %d (patience=%d)', epoch + 1, early_stop_patience)
                 break
+
+            if save_training_state:
+                self._save_training_state(
+                    checkpoint_path,
+                    epoch=epoch + 1,
+                    best_perf=best_perf,
+                    best_epoch=best_epoch,
+                    patience_counter=patience_counter,
+                )
 
         # If no validation checkpoint was produced (e.g., sparse eval cadence),
         # persist the current weights so load() below always has a valid target.
