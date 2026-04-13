@@ -19,10 +19,10 @@ DirectAUKG:
   freeze_embeddings: false
   freeze_lower_layers: 0
   freeze_tail_encoder: false
-  uniformity_max_samples: 512
+  uniformity_max_samples: 256
   uniformity_chunk_size: 128
   forward_chunk_size: 32768
-  epoch_per_test: 1
+  epoch_per_test: 10
   model_file: DirectAUKG.mdl
 TransE:
   optimizer: Adagrad
