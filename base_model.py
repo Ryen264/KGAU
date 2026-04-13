@@ -114,7 +114,14 @@ class BaseModel(object):
         return torch.cat(all_scores)
 
     # --- TRIPLE CLASSIFICATION METHODS ---
-    def find_thresholds(self, heads: torch.Tensor, relations: torch.Tensor, tails: torch.Tensor, labels: torch.Tensor) -> dict:
+    def find_thresholds(
+        self,
+        heads: torch.Tensor,
+        relations: torch.Tensor,
+        tails: torch.Tensor,
+        labels: torch.Tensor,
+        n_thresholds: int = 0,
+    ) -> dict:
         """
         Find the best distance thresholds for triple classification using a validation set.
         Returns a dictionary with relation-specific thresholds and a 'global' fallback threshold.
@@ -126,11 +133,18 @@ class BaseModel(object):
         thresholds = {}
         is_dist = self.model.is_distance_based
 
+        if n_thresholds and n_thresholds > 1:
+            global_min = float(scores.min().item())
+            global_max = float(scores.max().item())
+            threshold_candidates = torch.linspace(global_min, global_max, steps=int(n_thresholds))
+        else:
+            threshold_candidates = None
+
         def get_best_thresh(s, l):
             best_acc = 0.0
             best_t = 0.0
-            s_sorted = torch.unique(s) # Evaluate at unique score points
-            for t in s_sorted:
+            candidates = threshold_candidates if threshold_candidates is not None else torch.unique(s)
+            for t in candidates:
                 preds = (s <= t).long() if is_dist else (s >= t).long()
                 acc = (preds == l).float().mean().item()
                 if acc > best_acc:
@@ -147,6 +161,13 @@ class BaseModel(object):
             r_mask = (relations == r)
             thresholds[r.item()] = get_best_thresh(scores[r_mask], labels[r_mask])
             
+        if threshold_candidates is not None:
+            logging.info(
+                "Threshold search used fixed grid (%d points) in [%.4f, %.4f].",
+                int(n_thresholds),
+                float(threshold_candidates[0].item()),
+                float(threshold_candidates[-1].item()),
+            )
         logging.info(f"Thresholds configured for {len(unique_relations)} specific relations. Global fallback: {thresholds['global']:.4f}")
         return thresholds
 

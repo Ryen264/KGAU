@@ -322,8 +322,14 @@ class DirectAUKG(BaseModel):
             self.model.freeze_tail_encoder,
         )
 
-    def train(self, train_data: Tuple[torch.Tensor, torch.Tensor, torch.Tensor],
-              corrupter, tester, early_stop_patience: int=-1) -> tuple[float, int]:
+    def train(
+        self,
+        train_data: Tuple[torch.Tensor, torch.Tensor, torch.Tensor],
+        corrupter,
+        valid_tester,
+        test_tester=None,
+        early_stop_patience: int=-1,
+    ) -> tuple[float, int]:
         
         head, relation, tail = train_data
         n_train = len(head)
@@ -467,16 +473,23 @@ class DirectAUKG(BaseModel):
             avg_loss = epoch_loss / n_train
             logging.info('Epoch %d/%d, Total Loss=%f', epoch + 1, self.n_epoch, avg_loss)
 
-            # Evaluation and Early Stopping
-            if ((self.n_epoch >= self.epoch_per_test) and ((epoch + 1) % self.epoch_per_test == 0)):
-                test_perf = tester()
-                if (test_perf > best_perf):
-                    self.save()
-                    best_perf = test_perf
-                    best_epoch = epoch + 1
-                    patience_counter = 0
-                else:
-                    patience_counter += 1
+            # Validation runs every epoch and drives checkpoint/early stopping.
+            valid_perf = float(valid_tester(epoch + 1, self.n_epoch))
+            if (valid_perf > best_perf):
+                self.save()
+                best_perf = valid_perf
+                best_epoch = epoch + 1
+                patience_counter = 0
+            else:
+                patience_counter += 1
+
+            # Test-set evaluation cadence is controlled by epoch_per_test.
+            if (
+                test_tester is not None
+                and (self.n_epoch >= self.epoch_per_test)
+                and ((epoch + 1) % self.epoch_per_test == 0)
+            ):
+                test_tester(epoch + 1, self.n_epoch)
 
             if (early_stop_patience > 0 and patience_counter >= early_stop_patience):
                 logging.info('Early stopping triggered at epoch %d (patience=%d)', epoch + 1, early_stop_patience)

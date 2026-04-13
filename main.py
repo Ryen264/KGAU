@@ -15,7 +15,7 @@ import torch
 
 import config
 from data_loader import graph_size, index_entity_relation, read_data
-from datasets import BernCorrupter, sparse_heads_tails
+from datasets import BernCorrupter, convert_data_to_no_label, sparse_heads_tails
 from model import DirectAUKG
 
 
@@ -25,6 +25,7 @@ class ExperimentResult:
 	best_valid_mrr: float
 	best_epoch: int
 	link_metrics: Dict[str, float]
+	classification_metrics: Dict[str, float]
 
 
 def parse_args() -> argparse.Namespace:
@@ -50,6 +51,12 @@ def parse_args() -> argparse.Namespace:
 		type=int,
 		default=1024,
 		help="Number of validation triples used for quick sanity-check eval during training. <=0 means full valid set.",
+	)
+	parser.add_argument(
+		"--cls_n_thresholds",
+		type=int,
+		default=401,
+		help="Number of predefined thresholds for validation-based triple classification tuning. <=1 falls back to unique-score thresholds.",
 	)
 
 	parser.add_argument("--dim", type=int, default=200, help="Embedding dimension.")
@@ -189,8 +196,8 @@ def build_paths(args: argparse.Namespace) -> Dict[str, str]:
 	base_dir = os.path.join(args.data_root, args.dataset)
 	return {
 		"train": os.path.join(base_dir, "train.txt"),
-		"valid": os.path.join(base_dir, "valid.txt"),
-		"test": os.path.join(base_dir, "test.txt"),
+		"valid_w_label": os.path.join(base_dir, "valid_w_label.txt"),
+		"test_w_label": os.path.join(base_dir, "test_w_label.txt"),
 	}
 
 
@@ -238,15 +245,25 @@ def to_tensor_triplets(data: Tuple[list, list, list]) -> Tuple[torch.Tensor, tor
 	return torch.LongTensor(h), torch.LongTensor(r), torch.LongTensor(t)
 
 
+def to_tensor_triplets_with_labels(
+	data: Tuple[list, list, list, list],
+) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+	h, r, t, y = data
+	return torch.LongTensor(h), torch.LongTensor(r), torch.LongTensor(t), torch.LongTensor(y)
+
+
 def train_and_evaluate(
 	model_name: str,
 	model,
 	train_triplets: Tuple[torch.Tensor, torch.Tensor, torch.Tensor],
-	valid_triplets: Tuple[torch.Tensor, torch.Tensor, torch.Tensor],
-	test_triplets: Tuple[torch.Tensor, torch.Tensor, torch.Tensor],
+	valid_lp_triplets: Tuple[torch.Tensor, torch.Tensor, torch.Tensor],
+	test_lp_triplets: Tuple[torch.Tensor, torch.Tensor, torch.Tensor],
+	valid_cls_triplets: Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor],
+	test_cls_triplets: Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor],
 	n_entity: int,
 	early_stop_patience: int,
 	quick_eval_samples: int,
+	cls_n_thresholds: int,
 ) -> ExperimentResult:
 	def _sample_triplets(
 		triplets: Tuple[torch.Tensor, torch.Tensor, torch.Tensor],
@@ -260,37 +277,120 @@ def train_and_evaluate(
 		return head[idx], relation[idx], tail[idx]
 
 	train_lists = tuple(x.tolist() for x in train_triplets)
-	valid_quick_triplets = _sample_triplets(valid_triplets, quick_eval_samples)
+	valid_quick_triplets = _sample_triplets(valid_lp_triplets, quick_eval_samples)
 	valid_quick_lists = tuple(x.tolist() for x in valid_quick_triplets)
-	test_lists = tuple(x.tolist() for x in test_triplets)
-	valid_full_lists = tuple(x.tolist() for x in valid_triplets)
+	test_lists = tuple(x.tolist() for x in test_lp_triplets)
+	valid_full_lists = tuple(x.tolist() for x in valid_lp_triplets)
 
-	eval_heads_valid, eval_tails_valid = sparse_heads_tails(n_entity, train_lists, valid_quick_lists, None)
+	eval_heads_valid, eval_tails_valid = sparse_heads_tails(n_entity, train_lists, valid_full_lists, None)
 	eval_heads_test, eval_tails_test = sparse_heads_tails(n_entity, train_lists, valid_full_lists, test_lists)
 
 	corrupter = None
 	if getattr(model, "uses_negative_sampling", True):
 		corrupter = BernCorrupter(train_lists, n_entity, model.n_relation)
 
-	def valid_link_tester() -> float:
-		valid_metrics = model.test_link(valid_quick_triplets, eval_heads_valid, eval_tails_valid, filt=True)
-		return float(valid_metrics["mrr"])
+	valid_h, valid_r, valid_t, valid_y = valid_cls_triplets
+	test_h, test_r, test_t, test_y = test_cls_triplets
+
+	def valid_epoch_tester(epoch_idx: int, total_epochs: int) -> float:
+		valid_lp_metrics = model.test_link(valid_lp_triplets, eval_heads_valid, eval_tails_valid, filt=True)
+		valid_thresholds = model.find_thresholds(
+			valid_h,
+			valid_r,
+			valid_t,
+			valid_y,
+			n_thresholds=cls_n_thresholds,
+		)
+		valid_cls_metrics = model.test_classification(
+			valid_h,
+			valid_r,
+			valid_t,
+			valid_y,
+			valid_thresholds,
+		)
+		msg_lp = (
+			f"Validation Link Prediction (epoch {epoch_idx}/{total_epochs}): "
+			f"MR={valid_lp_metrics['mr']:.4f}, MRR={valid_lp_metrics['mrr']:.4f}, "
+			f"Hit@1={valid_lp_metrics['hit@1']:.4f}, Hit@3={valid_lp_metrics['hit@3']:.4f}, "
+			f"Hit@10={valid_lp_metrics['hit@10']:.4f}"
+		)
+		msg_cls = (
+			f"Validation Triple Classification (epoch {epoch_idx}/{total_epochs}): "
+			f"ACC={valid_cls_metrics['accuracy']:.4f}, PREC={valid_cls_metrics['precision']:.4f}, "
+			f"REC={valid_cls_metrics['recall']:.4f}, F1={valid_cls_metrics['f1']:.4f}, "
+			f"PR_AUC={valid_cls_metrics['pr_auc']:.4f}, ROC_AUC={valid_cls_metrics['roc_auc']:.4f}"
+		)
+		print(msg_lp)
+		print(msg_cls)
+		logging.info(msg_lp)
+		logging.info(msg_cls)
+		return float(valid_lp_metrics["mrr"])
+
+	def test_epoch_tester(epoch_idx: int, total_epochs: int) -> None:
+		test_lp_metrics = model.test_link(test_lp_triplets, eval_heads_test, eval_tails_test, filt=True)
+		thresholds = model.find_thresholds(
+			valid_h,
+			valid_r,
+			valid_t,
+			valid_y,
+			n_thresholds=cls_n_thresholds,
+		)
+		test_cls_metrics = model.test_classification(
+			test_h,
+			test_r,
+			test_t,
+			test_y,
+			thresholds,
+		)
+		msg_lp = (
+			f"Test Link Prediction (epoch {epoch_idx}/{total_epochs}): "
+			f"MR={test_lp_metrics['mr']:.4f}, MRR={test_lp_metrics['mrr']:.4f}, "
+			f"Hit@1={test_lp_metrics['hit@1']:.4f}, Hit@3={test_lp_metrics['hit@3']:.4f}, "
+			f"Hit@10={test_lp_metrics['hit@10']:.4f}"
+		)
+		msg_cls = (
+			f"Test Triple Classification (epoch {epoch_idx}/{total_epochs}): "
+			f"ACC={test_cls_metrics['accuracy']:.4f}, PREC={test_cls_metrics['precision']:.4f}, "
+			f"REC={test_cls_metrics['recall']:.4f}, F1={test_cls_metrics['f1']:.4f}, "
+			f"PR_AUC={test_cls_metrics['pr_auc']:.4f}, ROC_AUC={test_cls_metrics['roc_auc']:.4f}"
+		)
+		print(msg_lp)
+		print(msg_cls)
+		logging.info(msg_lp)
+		logging.info(msg_cls)
 
 	best_valid_mrr, best_epoch = model.train(
 		train_triplets,
 		corrupter,
-		valid_link_tester,
+		valid_epoch_tester,
+		test_tester=test_epoch_tester,
 		early_stop_patience=early_stop_patience,
 	)
 
 	# Full evaluation is run only once after training is complete.
-	link_metrics = model.test_link(test_triplets, eval_heads_test, eval_tails_test, filt=True)
+	link_metrics = model.test_link(test_lp_triplets, eval_heads_test, eval_tails_test, filt=True)
+
+	thresholds = model.find_thresholds(
+		valid_h,
+		valid_r,
+		valid_t,
+		valid_y,
+		n_thresholds=cls_n_thresholds,
+	)
+	classification_metrics = model.test_classification(
+		test_h,
+		test_r,
+		test_t,
+		test_y,
+		thresholds,
+	)
 
 	return ExperimentResult(
 		model_name=model_name,
 		best_valid_mrr=best_valid_mrr,
 		best_epoch=best_epoch,
 		link_metrics=link_metrics,
+		classification_metrics=classification_metrics,
 	)
 
 
@@ -307,6 +407,15 @@ def print_summary(results: Tuple[ExperimentResult, ...]) -> None:
 			f"Hit@1={res.link_metrics['hit@1']:.4f}, "
 			f"Hit@3={res.link_metrics['hit@3']:.4f}, "
 			f"Hit@10={res.link_metrics['hit@10']:.4f}"
+		)
+		lines.append(
+			"Triple Classification (test_w_label): "
+			f"ACC={res.classification_metrics['accuracy']:.4f}, "
+			f"PREC={res.classification_metrics['precision']:.4f}, "
+			f"REC={res.classification_metrics['recall']:.4f}, "
+			f"F1={res.classification_metrics['f1']:.4f}, "
+			f"PR_AUC={res.classification_metrics['pr_auc']:.4f}, "
+			f"ROC_AUC={res.classification_metrics['roc_auc']:.4f}"
 		)
 
 	for line in lines:
@@ -331,16 +440,32 @@ def main() -> None:
 
 	kb_index = index_entity_relation(
 		paths["train"],
-		paths["valid"],
-		paths["test"],
+		paths["valid_w_label"],
+		paths["test_w_label"],
 	)
 	n_entity, n_relation = graph_size(kb_index)
 	logging.info("Graph size: n_entity=%d, n_relation=%d", n_entity, n_relation)
 	entity_texts, relation_texts = build_text_corpora(args, kb_index)
 
 	train_triplets = to_tensor_triplets(read_data(paths["train"], kb_index))
-	valid_triplets = to_tensor_triplets(read_data(paths["valid"], kb_index))
-	test_triplets = to_tensor_triplets(read_data(paths["test"], kb_index))
+	valid_w_label_lists = read_data(paths["valid_w_label"], kb_index, with_label=True)
+	test_w_label_lists = read_data(paths["test_w_label"], kb_index, with_label=True)
+	valid_labels = valid_w_label_lists[3]
+	test_labels = test_w_label_lists[3]
+	logging.info(
+		"Loaded validation/test with labels: valid=%d (pos=%d, neg=%d), test=%d (pos=%d, neg=%d)",
+		len(valid_labels),
+		sum(1 for y in valid_labels if y == 1),
+		sum(1 for y in valid_labels if y == 0),
+		len(test_labels),
+		sum(1 for y in test_labels if y == 1),
+		sum(1 for y in test_labels if y == 0),
+	)
+
+	valid_triplets = to_tensor_triplets(convert_data_to_no_label(valid_w_label_lists))
+	test_triplets = to_tensor_triplets(convert_data_to_no_label(test_w_label_lists))
+	valid_cls_triplets = to_tensor_triplets_with_labels(valid_w_label_lists)
+	test_cls_triplets = to_tensor_triplets_with_labels(test_w_label_lists)
 
 	direct_model = DirectAUKG(n_entity, n_relation, entity_texts, relation_texts)
 
@@ -348,11 +473,14 @@ def main() -> None:
 		model_name="DirectAUKG",
 		model=direct_model,
 		train_triplets=train_triplets,
-		valid_triplets=valid_triplets,
-		test_triplets=test_triplets,
+		valid_lp_triplets=valid_triplets,
+		test_lp_triplets=test_triplets,
+		valid_cls_triplets=valid_cls_triplets,
+		test_cls_triplets=test_cls_triplets,
 		n_entity=n_entity,
 		early_stop_patience=args.early_stop_patience,
 		quick_eval_samples=args.quick_eval_samples,
+		cls_n_thresholds=args.cls_n_thresholds,
 	)
 
 	print_summary((direct_result,))
