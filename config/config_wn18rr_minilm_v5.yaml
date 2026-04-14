@@ -5,13 +5,13 @@ DirectAUKG:
   optimizer: AdamW
   learning_rate: 0.00003
   dim: 384
-  gamma: 1.0
+  gamma: 0.5
   encoder_name: sentence-transformers/all-MiniLM-L6-v2
   max_length: 64
-  encode_batch_size: 14
+  encode_batch_size: 8
   compose_mode: add
-  n_epoch: 20
-  n_batch: 256
+  n_epoch: 10
+  n_batch: 512
   grad_accum_steps: 1
   amp: true
   amp_dtype: fp16
@@ -19,7 +19,7 @@ DirectAUKG:
   freeze_embeddings: false
   freeze_lower_layers: 0
   freeze_tail_encoder: false
-  uniformity_max_samples: 340
+  uniformity_max_samples: 170
   uniformity_chunk_size: 128
   forward_chunk_size: 32768
   epoch_per_test: 10

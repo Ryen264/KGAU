@@ -46,7 +46,7 @@ def parse_args() -> argparse.Namespace:
 	parser.add_argument("--seed", type=int, default=42, help="Random seed.")
 	parser.add_argument("--gpu", type=int, default=None, help="GPU id. If not set, auto-select.")
 	parser.add_argument("--resume_checkpoint", default="", help="Path to a training checkpoint to resume DirectAUKG training.")
-	parser.add_argument("--early_stop_patience", type=int, default=-1, help="Early stopping patience. -1 disables it.")
+	parser.add_argument("--early_stop_patience", type=int, default=5, help="Early stopping patience. -1 disables it.")
 	parser.add_argument(
 		"--quick_eval_samples",
 		type=int,
