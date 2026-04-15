@@ -106,7 +106,7 @@ class DirectAUKG(BaseModel):
         self.model_path = os.path.join(self.task_dir, self.model_config.model_file)
 
         self.n_epoch = self.model_config.n_epoch
-        self.n_batch = self.model_config.n_batch
+        self.batch_size = getattr(self.model_config, 'batch_size', self.model_config.batch_size)
         self.epoch_per_test = self.model_config.epoch_per_test
 
         self.optimizer_name = self.model_config.optimizer
@@ -137,8 +137,8 @@ class DirectAUKG(BaseModel):
             tail = tail[rand_idx].to(config.device)
             
             # Custom batching logic: We drop the corrupter and negative samples entirely
-            for start_idx in range(0, n_train, self.n_batch):
-                end_idx = min(start_idx + self.n_batch, n_train)
+            for start_idx in range(0, n_train, self.batch_size):
+                end_idx = min(start_idx + self.batch_size, n_train)
                 
                 h_batch = head[start_idx:end_idx]
                 r_batch = relation[start_idx:end_idx]

@@ -33,11 +33,23 @@ def sparse_heads_tails(n_entity: int, train_data: tuple[list[int], list[int], li
     for k in heads.keys():
         indices = torch.LongTensor([list(heads[k])])
         values = torch.ones(len(heads[k]))
-        heads_sparse[k] = torch.sparse_coo_tensor(indices, values, torch.Size([n_entity]), dtype=torch.float32)
+        heads_sparse[k] = torch.sparse_coo_tensor(
+            indices,
+            values,
+            torch.Size([n_entity]),
+            dtype=torch.float32,
+            check_invariants=False,
+        )
     for k in tails.keys():
         indices = torch.LongTensor([list(tails[k])])
         values = torch.ones(len(tails[k]))
-        tails_sparse[k] = torch.sparse_coo_tensor(indices, values, torch.Size([n_entity]), dtype=torch.float32)
+        tails_sparse[k] = torch.sparse_coo_tensor(
+            indices,
+            values,
+            torch.Size([n_entity]),
+            dtype=torch.float32,
+            check_invariants=False,
+        )
     return heads_sparse, tails_sparse
 
 def inplace_shuffle(*lists: list) -> None:

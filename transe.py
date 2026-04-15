@@ -7,7 +7,7 @@ from torch.optim import Adam, SGD, Adagrad, RMSprop
 
 import config
 from base_model import BaseModule, BaseModel
-from datasets import batch_by_num
+from datasets import batch_by_size
 
 OPTIMIZER_MAP = {
     'Adam': Adam,
@@ -63,7 +63,7 @@ class TransE(BaseModel):
         self.model_path = os.path.join(self.task_dir, self.model_config.model_file)
 
         self.n_epoch = self.model_config.n_epoch
-        self.n_batch = self.model_config.n_batch
+        self.batch_size = getattr(self.model_config, 'batch_size', self.model_config.n_batch)
         self.epoch_per_test = self.model_config.epoch_per_test
 
         self.optimizer_name = self.model_config.optimizer
@@ -95,7 +95,7 @@ class TransE(BaseModel):
             head_corrupted = head_corrupted.to(config.device)
             tail_corrupted = tail_corrupted.to(config.device)
             
-            for h0, r, t0, h1, t1 in batch_by_num(self.n_batch, head_device, relation_device, tail_device,
+            for h0, r, t0, h1, t1 in batch_by_size(self.batch_size, head_device, relation_device, tail_device,
                                                   head_corrupted, tail_corrupted, n_sample=n_train):
                 self.model.zero_grad()
                 loss = torch.sum(self.model.pair_loss(h0, r, t0, h1, t1))

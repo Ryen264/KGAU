@@ -1,4 +1,4 @@
-test_batch_size: 100
+test_batch_size: 10
 dataset: wn18rr
 task: all
 DirectAUKG:
@@ -7,9 +7,9 @@ DirectAUKG:
   dim: 50
   gamma: 0.1
   compose_mode: mul
-  n_epoch: 200
+  n_epoch: 20
   batch_size: 256
-  epoch_per_test: 50
+  epoch_per_test: 5
   model_file: DirectAUKG.mdl
 TransE:
   optimizer: Adam
@@ -18,9 +18,9 @@ TransE:
   margin: 3
   p: 1
   temp: 1
-  n_epoch: 200
+  n_epoch: 20
   batch_size: 256
-  epoch_per_test: 50
+  epoch_per_test: 5
   model_file: TransE.mdl
 log:
   dump_config: false

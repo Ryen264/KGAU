@@ -46,7 +46,14 @@ def parse_args() -> argparse.Namespace:
 	parser.add_argument("--test_batch_size", type=int, default=256, help="Batch size for evaluation.")
 
 	parser.add_argument("--direct_n_epoch", type=int, default=200, help="Epochs for DirectAUKG.")
-	parser.add_argument("--direct_n_batch", type=int, default=128, help="Mini-batches per epoch for DirectAUKG.")
+	parser.add_argument(
+		"--direct_batch_size",
+		"--direct_n_batch",
+		dest="direct_batch_size",
+		type=int,
+		default=128,
+		help="Training batch size for DirectAUKG.",
+	)
 	parser.add_argument("--direct_lr", type=float, default=1e-3, help="Learning rate for DirectAUKG.")
 	parser.add_argument("--direct_compose", default="mul", choices=["mul", "add"], help="Composition mode for DirectAUKG.")
 
@@ -129,7 +136,7 @@ def build_runtime_config(args: argparse.Namespace) -> None:
 		"DirectAU_KG": {
 			"model_file": "directaukg.pt",
 			"n_epoch": args.direct_n_epoch,
-			"n_batch": args.direct_n_batch,
+			"batch_size": args.direct_batch_size,
 			"epoch_per_test": 5,
 			"optimizer": "Adam",
 			"learning_rate": args.direct_lr,
@@ -144,6 +151,11 @@ def build_runtime_config(args: argparse.Namespace) -> None:
 def load_config(args: argparse.Namespace) -> None:
 	if os.path.exists(args.config):
 		cfg = config.config(args.config)
+
+		# Backward-compatibility: normalize legacy n_batch to batch_size.
+		for _, section_cfg in cfg.items():
+			if isinstance(section_cfg, dict) and "batch_size" not in section_cfg and "n_batch" in section_cfg:
+				section_cfg["batch_size"] = section_cfg["n_batch"]
 
 		# Backward-compatibility: model code expects DirectAU_KG.
 		if "DirectAU_KG" not in cfg:
