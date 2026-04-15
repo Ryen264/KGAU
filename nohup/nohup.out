@@ -1,0 +1,20 @@
+           main 18:28:01 Writing logs to ./logs/wn18rr/comparison/compare_directaukg_gamma_sweep_260415-182801.log
+         config 18:28:01 Could not parse nvidia-smi output. Defaulting to GPU 0.
+         config 18:28:01 Using GPU: cuda:0
+           main 18:28:02 Graph size: n_entity=40943, n_relation=11
+          model 18:28:09 Epoch 1/200, Total Loss=1.881020
+          model 18:28:11 Epoch 2/200, Total Loss=1.170358
+          model 18:28:13 Epoch 3/200, Total Loss=0.764969
+          model 18:28:15 Epoch 4/200, Total Loss=0.568184
+          model 18:28:18 Epoch 5/200, Total Loss=0.458145
+          model 18:28:20 Epoch 6/200, Total Loss=0.388077
+          model 18:28:22 Epoch 7/200, Total Loss=0.338676
+          model 18:28:25 Epoch 8/200, Total Loss=0.301351
+          model 18:28:27 Epoch 9/200, Total Loss=0.270999
+          model 18:28:29 Epoch 10/200, Total Loss=0.245841
+          model 18:28:31 Epoch 11/200, Total Loss=0.224412
+          model 18:28:34 Epoch 12/200, Total Loss=0.205589
+          model 18:28:36 Epoch 13/200, Total Loss=0.188935
+          model 18:28:38 Epoch 14/200, Total Loss=0.174179
+          model 18:28:40 Epoch 15/200, Total Loss=0.161097
+          model 18:28:43 Epoch 16/200, Total Loss=0.149013

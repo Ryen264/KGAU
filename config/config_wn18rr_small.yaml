@@ -4,6 +4,8 @@ task: all
 DirectAUKG:
   optimizer: Adam
   learning_rate: 0.005
+  weight_decay: 0.0
+  inverse_train: 0.0
   dim: 50
   gamma_h: 0.1
   gamma_t: 0.1

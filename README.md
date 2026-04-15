@@ -55,36 +55,29 @@ You can replace the config path with any file under `config/`, for example:
 
 ## Nohup Background Execution
 This repo now includes helper scripts in `nohup/`:
-- `nohup/run`
-- `nohup/check`
-- `nohup/stop_process`
-
-Make scripts executable once:
-
-```bash
-cd /home/bn/KGAU
-chmod +x nohup/run nohup/check nohup/stop_process
-```
+- `nohup/run.sh`
+- `nohup/check.sh`
+- `nohup/stop.sh`
 
 Start background run:
 
 ```bash
 cd /home/bn/KGAU
-nohup/run config/config_wn18rr.yaml
+nohup/run.sh config/config_wn18rr.yaml
 ```
 
 Check status and recent output:
 
 ```bash
 cd /home/bn/KGAU
-nohup/check
+nohup/check.sh
 ```
 
 Stop background process:
 
 ```bash
 cd /home/bn/KGAU
-nohup/stop_process
+nohup/stop.sh
 ```
 
 Nohup helper files:

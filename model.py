@@ -26,6 +26,7 @@ class DirectAU_KGModule(BaseModule):
         self.gamma_h = getattr(config, 'gamma_h', 1.0)
         self.gamma_t = getattr(config, 'gamma_t', 1.0)
         self.gamma_all_e = getattr(config, 'gamma_all_e', 1.0)
+        self.inverse_train = getattr(config, 'inverse_train', 0.0)
         self.compose_mode = getattr(config, 'compose_mode', 'mul') # 'mul' (Hadamard) or 'add'
 
         self.n_entity, self.n_relation = n_entity, n_relation
@@ -61,6 +62,19 @@ class DirectAU_KGModule(BaseModule):
         
         # ALIGN(x, y) = ||x - y||_2^2
         return (q - t_emb).norm(p=2, dim=-1).pow(2).mean()
+
+    def inverse_align_loss(self, head: torch.Tensor, relation: torch.Tensor, tail: torch.Tensor) -> torch.Tensor:
+        h_emb = self._normalize(self.entity_embed(head))
+        r_emb = self._normalize(self.relation_embed(relation))
+        t_emb = self._normalize(self.entity_embed(tail))
+
+        if self.compose_mode == 'mul':
+            r_inv = 1.0 / (r_emb + EPSILON)
+        else:
+            r_inv = -1.0 * r_emb
+
+        q_inv = self._compose(t_emb, r_inv)
+        return (q_inv - h_emb).norm(p=2, dim=-1).pow(2).mean()
 
     def uniformity_loss(self, unique_entities: torch.Tensor) -> torch.Tensor:
         if unique_entities.numel() < 2:
@@ -111,12 +125,13 @@ class DirectAUKG(BaseModel):
 
         self.optimizer_name = self.model_config.optimizer
         self.lr = self.model_config.learning_rate
+        self.weight_decay = getattr(self.model_config, 'weight_decay', 0.0)
 
         self.model = DirectAU_KGModule(self.n_entity, self.n_relation, self.model_config)
         self.model.to(config.device)
         self.is_distance_based = self.model.is_distance_based
         
-        self.opt = OPTIMIZER_MAP[self.optimizer_name](self.model.parameters(), lr=self.lr)
+        self.opt = OPTIMIZER_MAP[self.optimizer_name](self.model.parameters(), lr=self.lr, weight_decay=self.weight_decay)
 
     def train(self, train_data: Tuple[torch.Tensor, torch.Tensor, torch.Tensor],
               corrupter, tester, early_stop_patience: int=-1) -> tuple[float, int]:
@@ -148,6 +163,12 @@ class DirectAUKG(BaseModel):
                 
                 # 1. Calculate Alignment Loss
                 loss_align = self.model.align_loss(h_batch, r_batch, t_batch)
+
+                # Optional inverse training on (r_inv, t) -> h
+                if self.model.inverse_train != 0.0:
+                    loss_inv_align = self.model.inverse_align_loss(h_batch, r_batch, t_batch)
+                else:
+                    loss_inv_align = torch.zeros((), device=config.device)
                 
                 # 2. Calculate Uniformity Loss separately for head, tail, and all entities
                 unique_heads = h_batch.unique()
@@ -156,14 +177,12 @@ class DirectAUKG(BaseModel):
                 loss_uni_h = self.model.uniformity_loss(unique_heads)
                 loss_uni_t = self.model.uniformity_loss(unique_tails)
                 loss_uni_all_e = self.model.uniformity_loss(unique_all_entities)
-                loss_uni = (
-                    (self.model.gamma_h * loss_uni_h)
-                    + (self.model.gamma_t * loss_uni_t)
-                    + (self.model.gamma_all_e * loss_uni_all_e)
-                )
                 
                 # 3. Total DirectAU Loss
-                loss = loss_align + loss_uni
+                loss = loss_align + (self.model.inverse_train * loss_inv_align) \
+                    + (self.model.gamma_h * loss_uni_h) \
+                    + (self.model.gamma_t * loss_uni_t) \
+                    + (self.model.gamma_all_e * loss_uni_all_e) 
                 
                 loss.backward()
                 self.opt.step()
