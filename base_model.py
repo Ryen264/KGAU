@@ -78,7 +78,12 @@ class BaseModel(object):
         self.test_batch_size = config._config.test_batch_size
 
     def load(self, filepath: str) -> None:
-        self.model.load_state_dict(torch.load(filepath, map_location=config.device))
+        # Load state_dict safely; fall back for older PyTorch versions without weights_only.
+        try:
+            state_dict = torch.load(filepath, map_location=config.device, weights_only=True)
+        except TypeError:
+            state_dict = torch.load(filepath, map_location=config.device)
+        self.model.load_state_dict(state_dict)
 
     def save(self, filepath: str=None) -> None:
         if filepath is None:

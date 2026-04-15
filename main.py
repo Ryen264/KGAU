@@ -143,6 +143,7 @@ def build_runtime_config(args: argparse.Namespace) -> None:
 			"dim": args.dim,
 			"gamma_h": 1.0,
 			"gamma_t": 1.0,
+			"gamma_all_e": 1.0,
 			"compose_mode": args.direct_compose,
 		},
 	}
