@@ -15,6 +15,14 @@ from datasets import BernCorrupter, sparse_heads_tails
 from model import DirectAUKG
 
 
+# gamma_h, gamma_t, gamma_all_e, weight_decay, inverse_train
+HYPERPARA_VARIANTS = [
+	(1.0, 0.0, 0.5, 0.0, 1.0),
+	(0.0, 1.0, 0.5, 0.0, 1.0),
+	(1.0, 0.0, 0.5, 0.1, 1.0),
+	(0.0, 1.0, 0.5, 0.1, 1.0),
+]
+
 @dataclass
 class ExperimentResult:
 	model_name: str
@@ -109,21 +117,30 @@ def _format_gamma(value: float) -> str:
 	text = f"{value:g}"
 	return text.replace(".", "p")
 
-def build_direct_gamma_configs(base_cfg, gamma_variants: list) -> list[tuple[float, float, float, object]]:
+def build_direct_variant_configs(
+	base_cfg,
+	hyperpara_variants: list,
+) -> list[tuple[float, float, float, float, float, object]]:
 	configs = []
-	for gamma_h, gamma_t, gamma_all_e in gamma_variants:
+	for gamma_h, gamma_t, gamma_all_e, weight_decay, inverse_train in hyperpara_variants:
 		variant_cfg = _clone_cfg(base_cfg)
 		direct_cfg = variant_cfg["DirectAU_KG"] if "DirectAU_KG" in variant_cfg else variant_cfg["DirectAUKG"]
 		direct_cfg["gamma_h"] = gamma_h
 		direct_cfg["gamma_t"] = gamma_t
 		direct_cfg["gamma_all_e"] = gamma_all_e
+		direct_cfg["weight_decay"] = weight_decay
+		direct_cfg["inverse_train"] = inverse_train
 		direct_cfg["model_file"] = (
-			f"DirectAUKG_gh{_format_gamma(gamma_h)}_gt{_format_gamma(gamma_t)}_gae{_format_gamma(gamma_all_e)}.mdl"
+			f"DirectAUKG_gh{_format_gamma(gamma_h)}"
+			f"_gt{_format_gamma(gamma_t)}"
+			f"_gae{_format_gamma(gamma_all_e)}"
+			f"_wd{_format_gamma(weight_decay)}"
+			f"_inv{_format_gamma(inverse_train)}.mdl"
 		)
 		variant_cfg["DirectAU_KG"] = direct_cfg
 		if "DirectAUKG" in variant_cfg:
 			variant_cfg["DirectAUKG"] = direct_cfg
-		configs.append((gamma_h, gamma_t, gamma_all_e, variant_cfg))
+		configs.append((gamma_h, gamma_t, gamma_all_e, weight_decay, inverse_train, variant_cfg))
 	return configs
 
 def build_runtime_config(args: argparse.Namespace) -> None:
@@ -280,18 +297,6 @@ def print_summary(results: Tuple[ExperimentResult, ...]) -> None:
 
 
 def main() -> None:
-	# gamma_h, gamma_t, gamma_all_e
-	gamma_variants = [
-		(0.0, 0.0, 0.0),
-		(1.0, 0.0, 0.0),
-		(0.0, 1.0, 0.0),
-		(1.0, 1.0, 0.0),
-		(0.0, 0.0, 1.0),
-		(1.0, 0.0, 1.0),
-		(0.0, 1.0, 1.0),
-		(1.0, 1.0, 1.0)
-	]
-
 	args = parse_args()
 	set_seed(args.seed)
 	load_config(args)
@@ -323,12 +328,19 @@ def main() -> None:
 
 	base_cfg = _clone_cfg(config._config)
 	results = []
-	for gamma_h, gamma_t, gamma_all_e, variant_cfg in build_direct_gamma_configs(base_cfg, gamma_variants):
+	for gamma_h, gamma_t, gamma_all_e, weight_decay, inverse_train, variant_cfg in build_direct_variant_configs(
+		base_cfg,
+		HYPERPARA_VARIANTS,
+	):
 		set_seed(args.seed)
 		config._config = variant_cfg
 		direct_model = DirectAUKG(n_entity, n_relation)
 		result = train_and_evaluate(
-			model_name=f"DirectAUKG (gamma_h={gamma_h:g}, gamma_t={gamma_t:g}, gamma_all_e={gamma_all_e:g})",
+			model_name=(
+				"DirectAUKG "
+				f"(gamma_h={gamma_h:g}, gamma_t={gamma_t:g}, gamma_all_e={gamma_all_e:g}, "
+				f"weight_decay={weight_decay:g}, inverse_train={inverse_train:g})"
+			),
 			model=direct_model,
 			train_triplets=train_triplets,
 			valid_triplets=valid_triplets,
