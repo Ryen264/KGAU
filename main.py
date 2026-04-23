@@ -13,7 +13,7 @@ import config
 from data_loader import graph_size, index_entity_relation, read_data
 from datasets import BernCorrupter, sparse_heads_tails
 from model import DirectAUKG
-from transe import TransE
+from transd import TransD
 
 
 @dataclass
@@ -28,7 +28,7 @@ class ExperimentResult:
 
 def parse_args() -> argparse.Namespace:
 	parser = argparse.ArgumentParser(
-		description="Train and compare TransE vs DirectAU TransE."
+		description="Train and compare TransD vs DirectAU-TransD."
 	)
 	parser.add_argument(
 		"config_path",
@@ -45,12 +45,16 @@ def parse_args() -> argparse.Namespace:
 	parser.add_argument("--gpu", type=int, default=None, help="GPU id. If not set, auto-select.")
 	parser.add_argument("--early_stop_patience", type=int, default=-1, help="Early stopping patience. -1 disables it.")
 	parser.add_argument("--dim", type=int, default=200, help="Embedding dimension.")
-	parser.add_argument("--test_batch_size", type=int, default=256, help="Batch size for evaluation.")
+	parser.add_argument("--test_batch_size", type=int, default=32, help="Batch size for evaluation.")
 	parser.add_argument("--n_epoch", type=int, default=200, help="Training epochs.")
 	parser.add_argument("--batch_size", type=int, default=128, help="Training batch size.")
 	parser.add_argument("--lr", type=float, default=1e-3, help="Learning rate.")
-	parser.add_argument("--gamma", type=float, default=1.0, help="Uniformity weight for DirectAU TransE.")
-	parser.add_argument("--models", nargs="+", default=["TransE", "DirectAU"], choices=["TransE", "DirectAU"],
+	parser.add_argument("--margin", type=float, default=1.0, help="Margin for canonical TransD pairwise loss.")
+	parser.add_argument("--p", type=int, default=2, help="Norm order for canonical TransD distance.")
+	parser.add_argument("--temp", type=float, default=1.0, help="Temperature for probability logits.")
+	parser.add_argument("--relation_dim", type=int, default=None, help="Relation embedding dim for TransD. Defaults to --dim.")
+	parser.add_argument("--gamma", type=float, default=1.0, help="Uniformity weight for DirectAU-TransD.")
+	parser.add_argument("--models", nargs="+", default=["TransD", "DirectAU-TransD"], choices=["TransD", "DirectAU-TransD"],
 		help="Models to train and compare.")
 
 	args = parser.parse_args()
@@ -72,7 +76,7 @@ def setup_logging(args: argparse.Namespace, run_tag: str) -> str:
 	if not args.no_log_to_file:
 		log_task_dir = os.path.join(args.log_dir, args.dataset, "comparison")
 		os.makedirs(log_task_dir, exist_ok=True)
-		log_file_path = os.path.join(log_task_dir, f"{run_tag}_TransE-DirectAU.log")
+		log_file_path = os.path.join(log_task_dir, f"{run_tag}_DirectAU-TransD.log")
 		file_handler = logging.FileHandler(log_file_path, mode="w")
 		file_handler.setFormatter(formatter)
 		root_logger.addHandler(file_handler)
@@ -103,6 +107,7 @@ def _clone_cfg(cfg):
 
 
 def build_runtime_config(args: argparse.Namespace) -> None:
+	relation_dim = args.relation_dim if args.relation_dim is not None else args.dim
 	runtime_cfg = {
 		"dataset": args.dataset,
 		"task": "comparison",
@@ -112,36 +117,39 @@ def build_runtime_config(args: argparse.Namespace) -> None:
 			"dump_config": False,
 			"prefix": "kgau",
 		},
-		"TransE": {
-			"model_file": "TransE.mdl",
+		"TransD": {
+			"model_file": "TransD.mdl",
 			"n_epoch": args.n_epoch,
 			"batch_size": args.batch_size,
 			"epoch_per_test": 5,
 			"optimizer": "Adam",
 			"learning_rate": args.lr,
-			"margin": 1.0,
-			"p": 2,
+			"margin": args.margin,
+			"p": args.p,
 			"dim": args.dim,
-			"temp": 1.0,
+			"relation_dim": relation_dim,
+			"temp": args.temp,
 		},
-		"DirectAU_KG": {
-			"model_file": "DirectAU.mdl",
+		"DirectAU-KG": {
+			"model_file": "DirectAU-TransE.mdl",
 			"n_epoch": args.n_epoch,
 			"batch_size": args.batch_size,
 			"epoch_per_test": 5,
 			"optimizer": "Adam",
 			"learning_rate": args.lr,
 			"dim": args.dim,
+			"relation_dim": relation_dim,
+			"temp": args.temp,
 			"gamma": args.gamma,
 		},
 	}
 	config._config = _to_cfg(runtime_cfg)
 
 def apply_run_artifact_names(run_tag: str) -> None:
-	if "TransE" in config._config:
-		config._config["TransE"]["model_file"] = f"{run_tag}_TransE.mdl"
-	if "DirectAU_KG" in config._config:
-		config._config["DirectAU_KG"]["model_file"] = f"{run_tag}_DirectAU.mdl"
+	if "TransD" in config._config:
+		config._config["TransD"]["model_file"] = f"{run_tag}_TransD.mdl"
+	if "DirectAU-KG" in config._config:
+		config._config["DirectAU-KG"]["model_file"] = f"{run_tag}_DirectAU-TransD.mdl"
 
 def load_config(args: argparse.Namespace) -> None:
 	if os.path.exists(args.config):
@@ -152,12 +160,16 @@ def load_config(args: argparse.Namespace) -> None:
 			if isinstance(section_cfg, dict) and "batch_size" not in section_cfg and "n_batch" in section_cfg:
 				section_cfg["batch_size"] = section_cfg["n_batch"]
 
-		# Backward-compatibility: model code expects DirectAU_KG.
-		if "DirectAU_KG" not in cfg:
-			if "DirectAUKG" in cfg:
-				cfg["DirectAU_KG"] = cfg["DirectAUKG"]
+		# Backward-compatibility for updated model section names.
+		if "DirectAU-KG" not in cfg:
+			if "DirectAU_KG" in cfg:
+				cfg["DirectAU-KG"] = cfg["DirectAU_KG"]
+			elif "DirectAUKG" in cfg:
+				cfg["DirectAU-KG"] = cfg["DirectAUKG"]
+			elif "DirectAU-TransD" in cfg:
+				cfg["DirectAU-KG"] = cfg["DirectAU-TransD"]
 			else:
-				raise KeyError("Config must contain 'DirectAU_KG' or 'DirectAUKG'.")
+				raise KeyError("Config must contain one of: 'DirectAU-KG', 'DirectAU_KG', 'DirectAU-TransD', or 'DirectAUKG'.")
 
 		if "dataset" in cfg:
 			args.dataset = cfg["dataset"]
@@ -248,7 +260,7 @@ def train_and_evaluate(
 
 def print_summary(results: Tuple[ExperimentResult, ...]) -> None:
 	lines = ["", "=" * 80]
-	lines.append("TransE vs DirectAU TransE Performance Comparison")
+	lines.append("TransD vs DirectAU-TransD Performance Comparison")
 	lines.append("=" * 80)
 	
 	for res in results:
@@ -323,10 +335,10 @@ def main() -> None:
 		logging.info(f"Training {model_type} model...")
 		logging.info(f"{'='*80}")
 		
-		if model_type == "TransE":
-			model = TransE(n_entity, n_relation)
+		if model_type == "TransD":
+			model = TransD(n_entity, n_relation)
 			result = train_and_evaluate(
-				model_name="TransE (Canonical)",
+				model_name="TransD (Canonical)",
 				model=model,
 				train_triplets=train_triplets,
 				valid_triplets=valid_triplets,
@@ -336,10 +348,10 @@ def main() -> None:
 				n_entity=n_entity,
 				early_stop_patience=args.early_stop_patience,
 			)
-		elif model_type == "DirectAU":
+		elif model_type == "DirectAU-TransD":
 			model = DirectAUKG(n_entity, n_relation)
 			result = train_and_evaluate(
-				model_name=f"DirectAU TransE (gamma={args.gamma})",
+				model_name=f"DirectAU-TransD (gamma={args.gamma})",
 				model=model,
 				train_triplets=train_triplets,
 				valid_triplets=valid_triplets,

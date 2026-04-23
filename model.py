@@ -3,7 +3,7 @@ import torch.nn as nn
 import logging
 import os
 from typing import Tuple
-from torch.optim import Adam, SGD, Adagrad, RMSprop
+from torch.optim import Adam, SGD, Adagrad, Adadelta, RMSprop
 
 import config
 from base_model import BaseModule, BaseModel
@@ -12,70 +12,110 @@ OPTIMIZER_MAP = {
     'Adam': Adam,
     'SGD': SGD,
     'Adagrad': Adagrad,
+    'Adadelta': Adadelta,
     'RMSprop': RMSprop,
 }
 
 EPSILON = 1e-8
 
-class DirectAU_KGModule(BaseModule):
+class DirectAU_TransDModule(BaseModule):
     def __init__(self, n_entity: int, n_relation: int, config: config.config):
         super().__init__()
-        self.model_type = 'DirectAU_KG'
+        self.model_type = 'DirectAU-TransD'
 
-        self.dim = config.dim
-        self.gamma = config.get('gamma', 1.0)  # Uniformity weight per algorithm
+        self.entity_dim = config.dim
+        self.relation_dim = config.get('relation_dim', self.entity_dim)
+        self.gamma = config.get('gamma', 1.0)
+        self.temp = config.get('temp', 1.0)
 
         self.n_entity, self.n_relation = n_entity, n_relation
-        self.relation_embed = nn.Embedding(self.n_relation, self.dim)
-        self.entity_embed = nn.Embedding(self.n_entity, self.dim)
+
+        # Meaning vectors.
+        self.entity_embed = nn.Embedding(self.n_entity, self.entity_dim)
+        self.relation_embed = nn.Embedding(self.n_relation, self.relation_dim)
+
+        # Projection vectors.
+        self.entity_proj_embed = nn.Embedding(self.n_entity, self.entity_dim)
+        self.relation_proj_embed = nn.Embedding(self.n_relation, self.relation_dim)
+
         self.is_distance_based = True
         self.init_weight()
 
     def init_weight(self) -> None:
-        # Initialize embeddings with Uniform(-6/√k, 6/√k) per DirectAU algorithm
-        init_range = 6.0 / (self.dim ** 0.5)
-        self.relation_embed.weight.data.uniform_(-init_range, init_range)
-        self.entity_embed.weight.data.uniform_(-init_range, init_range)
+        # Initialize all meaning/projection vectors with Uniform(-6/sqrt(k), 6/sqrt(k)).
+        ent_range = 6.0 / (self.entity_dim ** 0.5)
+        rel_range = 6.0 / (self.relation_dim ** 0.5)
+        self.entity_embed.weight.data.uniform_(-ent_range, ent_range)
+        self.relation_embed.weight.data.uniform_(-rel_range, rel_range)
+        self.entity_proj_embed.weight.data.uniform_(-ent_range, ent_range)
+        self.relation_proj_embed.weight.data.uniform_(-rel_range, rel_range)
 
     def _normalize(self, x: torch.Tensor) -> torch.Tensor:
-        """Projects vectors onto the unit hypersphere."""
+        """Strict L2 normalization used by DirectAU-TransD."""
         return x / (x.norm(p=2, dim=-1, keepdim=True) + EPSILON)
 
-    def _compose(self, h: torch.Tensor, r: torch.Tensor) -> torch.Tensor:
-        """Composes head and relation via addition, then re-normalizes (per DirectAU algorithm)."""
-        q_raw = h + r
-        return self._normalize(q_raw)
+    def _identity_map(self, x: torch.Tensor) -> torch.Tensor:
+        """
+        Compute I^{m x n} x where x is in R^n.
+        If m < n, truncate. If m > n, zero-pad.
+        """
+        if self.relation_dim == self.entity_dim:
+            return x
+        if self.relation_dim < self.entity_dim:
+            return x[..., :self.relation_dim]
+        pad_size = self.relation_dim - self.entity_dim
+        pad = torch.zeros(*x.shape[:-1], pad_size, dtype=x.dtype, device=x.device)
+        return torch.cat([x, pad], dim=-1)
+
+    def _project_entities(self, e: torch.Tensor, e_p: torch.Tensor, r_p: torch.Tensor) -> torch.Tensor:
+        """
+        TransD projection:
+        e_perp = (r_p e_p^T + I^{m x n}) e = I^{m x n} e + r_p * <e_p, e>
+        """
+        identity_part = self._identity_map(e)
+        scalar = torch.sum(e_p * e, dim=-1, keepdim=True)
+        return identity_part + r_p * scalar
+
+    def _aligned_components(
+        self, head: torch.Tensor, relation: torch.Tensor, tail: torch.Tensor
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
+        h = self.entity_embed(head)
+        t = self.entity_embed(tail)
+        r = self.relation_embed(relation)
+
+        h_p = self.entity_proj_embed(head)
+        t_p = self.entity_proj_embed(tail)
+        r_p = self.relation_proj_embed(relation)
+
+        h_perp = self._project_entities(h, h_p, r_p)
+        t_perp = self._project_entities(t, t_p, r_p)
+
+        h_bar = self._normalize(h_perp)
+        r_bar = self._normalize(r)
+        t_bar = self._normalize(t_perp)
+
+        q = self._normalize(h_bar + r_bar)
+        return q, t_bar
 
     def align_loss(self, head: torch.Tensor, relation: torch.Tensor, tail: torch.Tensor) -> torch.Tensor:
-        """Calculate alignment loss per DirectAU algorithm: sum of ||q - t||_2^2 for each triple."""
-        h_emb = self._normalize(self.entity_embed(head))
-        r_emb = self._normalize(self.relation_embed(relation))
-        t_emb = self._normalize(self.entity_embed(tail))
-
-        q = self._compose(h_emb, r_emb)
-        
-        # Alignment loss = ||q - t||_2^2 per triple
-        return (q - t_emb).norm(p=2, dim=-1).pow(2)
+        # Local alignment term: ||q_bar - t_bar||_2^2 for each triple in the batch.
+        q, t_bar = self._aligned_components(head, relation, tail)
+        return (q - t_bar).norm(p=2, dim=-1).pow(2)
 
     def uniformity_loss(self, unique_entities: torch.Tensor) -> torch.Tensor:
-        """Calculate batch uniformity loss per DirectAU algorithm using log Gaussian potential."""
+        """Batch uniformity with log Gaussian potential over i != j pairs."""
         if unique_entities.numel() < 2:
             return torch.zeros((), device=unique_entities.device)
 
+        # Uniformity is computed from raw meaning vectors, then normalized.
         e_emb = self._normalize(self.entity_embed(unique_entities))
-        
-        # Uniformity loss = log(mean(exp(-2 * ||e_i - e_j||_2^2))) over all pairs i != j
         dist_sq = torch.pdist(e_emb, p=2).pow(2)
         return dist_sq.mul(-2).exp().mean().log()
 
     def forward(self, head: torch.Tensor, relation: torch.Tensor, tail: torch.Tensor) -> torch.Tensor:
-        # Inference distance used for scoring in link prediction / triple classification
-        h_emb = self._normalize(self.entity_embed(head))
-        r_emb = self._normalize(self.relation_embed(relation))
-        t_emb = self._normalize(self.entity_embed(tail))
-        
-        q = self._compose(h_emb, r_emb)
-        return (q - t_emb).norm(p=2, dim=-1)
+        # Inference distance follows the same aligned geometry used in training.
+        q, t_bar = self._aligned_components(head, relation, tail)
+        return (q - t_bar).norm(p=2, dim=-1)
 
     def dist(self, head: torch.Tensor, relation: torch.Tensor, tail: torch.Tensor) -> torch.Tensor:
         return self.forward(head, relation, tail)
@@ -84,20 +124,28 @@ class DirectAU_KGModule(BaseModule):
         return self.forward(head, relation, tail)
 
     def prob_logit(self, head: torch.Tensor, relation: torch.Tensor, tail: torch.Tensor) -> torch.Tensor:
-        # If your tester relies on temp scaling for logits
-        temp = getattr(self, 'temp', 1.0)
-        return -self.forward(head, relation ,tail) / temp
+        return -self.forward(head, relation, tail) / self.temp
 
     def constraint(self) -> None:
-        # Constraints are handled dynamically via L2 normalization during the forward pass.
+        # Constraints are enforced via strict normalization in forward/align computation.
         pass
 
 
 class DirectAUKG(BaseModel):
     def __init__(self, n_entity: int, n_relation: int):
         super().__init__(n_entity, n_relation)
-        self.model_type = 'DirectAU_KG'
-        self.model_config = config._config[self.model_type]
+        self.model_type = 'DirectAU-KG'
+
+        # Support both legacy and canonical config section names.
+        if self.model_type in config._config:
+            self.model_config = config._config[self.model_type]
+        elif 'DirectAU_KG' in config._config:
+            self.model_config = config._config['DirectAU_KG']
+        elif 'DirectAU-TransD' in config._config:
+            self.model_config = config._config['DirectAU-TransD']
+        else:
+            raise KeyError("Config must contain one of: 'DirectAU-KG', 'DirectAU_KG', or 'DirectAU-TransD'.")
+
         self.model_path = os.path.join(self.task_dir, self.model_config.model_file)
 
         self.n_epoch = self.model_config.n_epoch
@@ -108,7 +156,7 @@ class DirectAUKG(BaseModel):
         self.lr = self.model_config.learning_rate
         self.weight_decay = self.model_config.get('weight_decay', 0.0)
 
-        self.model = DirectAU_KGModule(self.n_entity, self.n_relation, self.model_config)
+        self.model = DirectAU_TransDModule(self.n_entity, self.n_relation, self.model_config)
         self.model.to(config.device)
         self.is_distance_based = self.model.is_distance_based
         
@@ -116,7 +164,7 @@ class DirectAUKG(BaseModel):
 
     def train(self, train_data: Tuple[torch.Tensor, torch.Tensor, torch.Tensor],
               corrupter, tester, early_stop_patience: int=-1) -> tuple[float, int]:
-        """Train using DirectAU TransE algorithm: no negative sampling, alignment + uniformity loss."""
+        """Train Updated TransD with DirectAU alignment + uniformity objective."""
         
         head, relation, tail = train_data
         n_train = len(head)

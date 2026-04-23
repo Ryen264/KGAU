@@ -3,15 +3,17 @@ d_config: TransE
 test_batch_size: 100
 dataset: fb15k237
 task: all
-DirectAU_KG:
+DirectAU-KG:
   optimizer: Adam
   learning_rate: 0.01
   dim: 50
+  relation_dim: 50
+  temp: 1
   gamma: 1.0
   n_epoch: 1000
   batch_size: 100
   epoch_per_test: 50
-  model_file: DirectAU.mdl
+  model_file: DirectAU-TransD.mdl
 KBGAN:
   class_rank_balance: 1.0
   early_stop_patience: -1
@@ -35,6 +37,7 @@ TransD:
   optimizer: Adagrad
   learning_rate: 0.01
   dim: 50
+  relation_dim: 50
   margin: 3
   p: 1
   temp: 1
