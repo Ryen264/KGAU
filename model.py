@@ -20,7 +20,7 @@ EPSILON = 1e-8
 class DirectAU_KGModule(BaseModule):
     def __init__(self, n_entity: int, n_relation: int, config: config.config):
         super().__init__()
-        self.model_type = 'DirectAU_KG'
+        self.model_type = 'DirectAU-KG'
 
         self.dim = config.dim
         self.gamma = config.get('gamma', 1.0)  # Uniformity weight per algorithm
@@ -96,7 +96,7 @@ class DirectAU_KGModule(BaseModule):
 class DirectAUKG(BaseModel):
     def __init__(self, n_entity: int, n_relation: int):
         super().__init__(n_entity, n_relation)
-        self.model_type = 'DirectAU_KG'
+        self.model_type = 'DirectAU-KG'
         self.model_config = config._config[self.model_type]
         self.model_path = os.path.join(self.task_dir, self.model_config.model_file)
 
@@ -116,7 +116,7 @@ class DirectAUKG(BaseModel):
 
     def train(self, train_data: Tuple[torch.Tensor, torch.Tensor, torch.Tensor],
               corrupter, tester, early_stop_patience: int=-1) -> tuple[float, int]:
-        """Train using DirectAU TransE algorithm: no negative sampling, alignment + uniformity loss."""
+        """Train using DirectAU-TransE algorithm: no negative sampling, alignment + uniformity loss."""
         
         head, relation, tail = train_data
         n_train = len(head)

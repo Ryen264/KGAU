@@ -28,7 +28,7 @@ class ExperimentResult:
 
 def parse_args() -> argparse.Namespace:
 	parser = argparse.ArgumentParser(
-		description="Train and compare TransE vs DirectAU TransE."
+		description="Train and compare TransE vs DirectAU-TransE."
 	)
 	parser.add_argument(
 		"config_path",
@@ -49,8 +49,8 @@ def parse_args() -> argparse.Namespace:
 	parser.add_argument("--n_epoch", type=int, default=200, help="Training epochs.")
 	parser.add_argument("--batch_size", type=int, default=128, help="Training batch size.")
 	parser.add_argument("--lr", type=float, default=1e-3, help="Learning rate.")
-	parser.add_argument("--gamma", type=float, default=1.0, help="Uniformity weight for DirectAU TransE.")
-	parser.add_argument("--models", nargs="+", default=["TransE", "DirectAU"], choices=["TransE", "DirectAU"],
+	parser.add_argument("--gamma", type=float, default=1.0, help="Uniformity weight for DirectAU-TransE.")
+	parser.add_argument("--models", nargs="+", default=["TransE", "DirectAU-KG"], choices=["TransE", "DirectAU-KG"],
 		help="Models to train and compare.")
 
 	args = parser.parse_args()
@@ -72,7 +72,7 @@ def setup_logging(args: argparse.Namespace, run_tag: str) -> str:
 	if not args.no_log_to_file:
 		log_task_dir = os.path.join(args.log_dir, args.dataset, "comparison")
 		os.makedirs(log_task_dir, exist_ok=True)
-		log_file_path = os.path.join(log_task_dir, f"{run_tag}_TransE-DirectAU.log")
+		log_file_path = os.path.join(log_task_dir, f"{run_tag}_DirectAU-TransE.log")
 		file_handler = logging.FileHandler(log_file_path, mode="w")
 		file_handler.setFormatter(formatter)
 		root_logger.addHandler(file_handler)
@@ -124,8 +124,8 @@ def build_runtime_config(args: argparse.Namespace) -> None:
 			"dim": args.dim,
 			"temp": 1.0,
 		},
-		"DirectAU_KG": {
-			"model_file": "DirectAU.mdl",
+		"DirectAU-KG": {
+			"model_file": "DirectAU-KG.mdl",
 			"n_epoch": args.n_epoch,
 			"batch_size": args.batch_size,
 			"epoch_per_test": 5,
@@ -140,8 +140,8 @@ def build_runtime_config(args: argparse.Namespace) -> None:
 def apply_run_artifact_names(run_tag: str) -> None:
 	if "TransE" in config._config:
 		config._config["TransE"]["model_file"] = f"{run_tag}_TransE.mdl"
-	if "DirectAU_KG" in config._config:
-		config._config["DirectAU_KG"]["model_file"] = f"{run_tag}_DirectAU.mdl"
+	if "DirectAU-KG" in config._config:
+		config._config["DirectAU-KG"]["model_file"] = f"{run_tag}_DirectAU-TransE.mdl"
 
 def load_config(args: argparse.Namespace) -> None:
 	if os.path.exists(args.config):
@@ -152,12 +152,12 @@ def load_config(args: argparse.Namespace) -> None:
 			if isinstance(section_cfg, dict) and "batch_size" not in section_cfg and "n_batch" in section_cfg:
 				section_cfg["batch_size"] = section_cfg["n_batch"]
 
-		# Backward-compatibility: model code expects DirectAU_KG.
-		if "DirectAU_KG" not in cfg:
+		# Backward-compatibility: model code expects DirectAU-KG.
+		if "DirectAU-KG" not in cfg:
 			if "DirectAUKG" in cfg:
-				cfg["DirectAU_KG"] = cfg["DirectAUKG"]
+				cfg["DirectAU-KG"] = cfg["DirectAUKG"]
 			else:
-				raise KeyError("Config must contain 'DirectAU_KG' or 'DirectAUKG'.")
+				raise KeyError("Config must contain 'DirectAU-KG' or 'DirectAUKG'.")
 
 		if "dataset" in cfg:
 			args.dataset = cfg["dataset"]
@@ -248,7 +248,7 @@ def train_and_evaluate(
 
 def print_summary(results: Tuple[ExperimentResult, ...]) -> None:
 	lines = ["", "=" * 80]
-	lines.append("TransE vs DirectAU TransE Performance Comparison")
+	lines.append("TransE vs DirectAU-TransE Performance Comparison")
 	lines.append("=" * 80)
 	
 	for res in results:
@@ -336,10 +336,10 @@ def main() -> None:
 				n_entity=n_entity,
 				early_stop_patience=args.early_stop_patience,
 			)
-		elif model_type == "DirectAU":
+		elif model_type == "DirectAU-KG":
 			model = DirectAUKG(n_entity, n_relation)
 			result = train_and_evaluate(
-				model_name=f"DirectAU TransE (gamma={args.gamma})",
+				model_name=f"DirectAU-TransE (gamma={args.gamma})",
 				model=model,
 				train_triplets=train_triplets,
 				valid_triplets=valid_triplets,
