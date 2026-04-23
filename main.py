@@ -13,15 +13,8 @@ import config
 from data_loader import graph_size, index_entity_relation, read_data
 from datasets import BernCorrupter, sparse_heads_tails
 from model import DirectAUKG
+from transe import TransE
 
-
-# gamma_h, gamma_t, gamma_all_e, weight_decay, inverse_train
-HYPERPARA_VARIANTS = [
-	(1.0, 0.0, 0.5, 0.0, 1.0),
-	(0.0, 1.0, 0.5, 0.0, 1.0),
-	(1.0, 0.0, 0.5, 0.1, 1.0),
-	(0.0, 1.0, 0.5, 0.1, 1.0),
-]
 
 @dataclass
 class ExperimentResult:
@@ -30,47 +23,42 @@ class ExperimentResult:
 	best_epoch: int
 	link_metrics: Dict[str, float]
 	cls_metrics: Dict[str, float]
+	train_time: float
+	total_time: float
 
 def parse_args() -> argparse.Namespace:
 	parser = argparse.ArgumentParser(
-		description="Train and compare DirectAUKG gamma settings on WN18RR for link prediction and triple classification."
+		description="Train and compare TransE vs DirectAU TransE."
 	)
 	parser.add_argument(
 		"config_path",
 		nargs="?",
 		default=None,
-		help="Optional positional path to YAML config file (e.g. python main.py config/config_wn18rr.yaml).",
+		help="Optional positional path to YAML config file.",
 	)
 	parser.add_argument("--config", default="./config/config_wn18rr.yaml", help="Path to YAML config file.")
-	parser.add_argument("--dataset", default="wn18rr", choices=["wn18rr"], help="Dataset name.")
+	parser.add_argument("--dataset", default="wn18rr", choices=["wn18rr", "fb15k237", "wn18"], help="Dataset name.")
 	parser.add_argument("--data_root", default="./data", help="Root folder that contains dataset files.")
 	parser.add_argument("--log_dir", default="./logs", help="Root folder for log files.")
 	parser.add_argument("--no_log_to_file", action="store_true", help="Disable writing logs to file.")
 	parser.add_argument("--seed", type=int, default=42, help="Random seed.")
 	parser.add_argument("--gpu", type=int, default=None, help="GPU id. If not set, auto-select.")
 	parser.add_argument("--early_stop_patience", type=int, default=-1, help="Early stopping patience. -1 disables it.")
-
 	parser.add_argument("--dim", type=int, default=200, help="Embedding dimension.")
 	parser.add_argument("--test_batch_size", type=int, default=256, help="Batch size for evaluation.")
-
-	parser.add_argument("--direct_n_epoch", type=int, default=200, help="Epochs for DirectAUKG.")
-	parser.add_argument(
-		"--direct_batch_size",
-		"--direct_n_batch",
-		dest="direct_batch_size",
-		type=int,
-		default=128,
-		help="Training batch size for DirectAUKG.",
-	)
-	parser.add_argument("--direct_lr", type=float, default=1e-3, help="Learning rate for DirectAUKG.")
-	parser.add_argument("--direct_compose", default="mul", choices=["mul", "add"], help="Composition mode for DirectAUKG.")
+	parser.add_argument("--n_epoch", type=int, default=200, help="Training epochs.")
+	parser.add_argument("--batch_size", type=int, default=128, help="Training batch size.")
+	parser.add_argument("--lr", type=float, default=1e-3, help="Learning rate.")
+	parser.add_argument("--gamma", type=float, default=1.0, help="Uniformity weight for DirectAU TransE.")
+	parser.add_argument("--models", nargs="+", default=["TransE", "DirectAU"], choices=["TransE", "DirectAU"],
+		help="Models to train and compare.")
 
 	args = parser.parse_args()
 	if args.config_path:
 		args.config = args.config_path
 	return args
 
-def setup_logging(args: argparse.Namespace) -> str:
+def setup_logging(args: argparse.Namespace, run_tag: str) -> str:
 	root_logger = logging.getLogger()
 	root_logger.handlers.clear()
 	root_logger.setLevel(logging.INFO)
@@ -84,9 +72,8 @@ def setup_logging(args: argparse.Namespace) -> str:
 	if not args.no_log_to_file:
 		log_task_dir = os.path.join(args.log_dir, args.dataset, "comparison")
 		os.makedirs(log_task_dir, exist_ok=True)
-		ts = time.strftime("%y%m%d-%H%M%S")
-		log_file_path = os.path.join(log_task_dir, f"compare_directaukg_gamma_sweep_{ts}.log")
-		file_handler = logging.FileHandler(log_file_path)
+		log_file_path = os.path.join(log_task_dir, f"{run_tag}_TransE-DirectAU.log")
+		file_handler = logging.FileHandler(log_file_path, mode="w")
 		file_handler.setFormatter(formatter)
 		root_logger.addHandler(file_handler)
 
@@ -113,35 +100,7 @@ def _clone_cfg(cfg):
 		return [_clone_cfg(v) for v in cfg]
 	return cfg
 
-def _format_gamma(value: float) -> str:
-	text = f"{value:g}"
-	return text.replace(".", "p")
 
-def build_direct_variant_configs(
-	base_cfg,
-	hyperpara_variants: list,
-) -> list[tuple[float, float, float, float, float, object]]:
-	configs = []
-	for gamma_h, gamma_t, gamma_all_e, weight_decay, inverse_train in hyperpara_variants:
-		variant_cfg = _clone_cfg(base_cfg)
-		direct_cfg = variant_cfg["DirectAU_KG"] if "DirectAU_KG" in variant_cfg else variant_cfg["DirectAUKG"]
-		direct_cfg["gamma_h"] = gamma_h
-		direct_cfg["gamma_t"] = gamma_t
-		direct_cfg["gamma_all_e"] = gamma_all_e
-		direct_cfg["weight_decay"] = weight_decay
-		direct_cfg["inverse_train"] = inverse_train
-		direct_cfg["model_file"] = (
-			f"DirectAUKG_gh{_format_gamma(gamma_h)}"
-			f"_gt{_format_gamma(gamma_t)}"
-			f"_gae{_format_gamma(gamma_all_e)}"
-			f"_wd{_format_gamma(weight_decay)}"
-			f"_inv{_format_gamma(inverse_train)}.mdl"
-		)
-		variant_cfg["DirectAU_KG"] = direct_cfg
-		if "DirectAUKG" in variant_cfg:
-			variant_cfg["DirectAUKG"] = direct_cfg
-		configs.append((gamma_h, gamma_t, gamma_all_e, weight_decay, inverse_train, variant_cfg))
-	return configs
 
 def build_runtime_config(args: argparse.Namespace) -> None:
 	runtime_cfg = {
@@ -153,23 +112,36 @@ def build_runtime_config(args: argparse.Namespace) -> None:
 			"dump_config": False,
 			"prefix": "kgau",
 		},
-		"DirectAU_KG": {
-			"model_file": "directaukg.pt",
-			"n_epoch": args.direct_n_epoch,
-			"batch_size": args.direct_batch_size,
+		"TransE": {
+			"model_file": "TransE.mdl",
+			"n_epoch": args.n_epoch,
+			"batch_size": args.batch_size,
 			"epoch_per_test": 5,
 			"optimizer": "Adam",
-			"learning_rate": args.direct_lr,
-			"weight_decay": 0.0,
-			"inverse_train": 0.0,
+			"learning_rate": args.lr,
+			"margin": 1.0,
+			"p": 2,
 			"dim": args.dim,
-			"gamma_h": 1.0,
-			"gamma_t": 1.0,
-			"gamma_all_e": 1.0,
-			"compose_mode": args.direct_compose,
+			"temp": 1.0,
+		},
+		"DirectAU_KG": {
+			"model_file": "DirectAU.mdl",
+			"n_epoch": args.n_epoch,
+			"batch_size": args.batch_size,
+			"epoch_per_test": 5,
+			"optimizer": "Adam",
+			"learning_rate": args.lr,
+			"dim": args.dim,
+			"gamma": args.gamma,
 		},
 	}
 	config._config = _to_cfg(runtime_cfg)
+
+def apply_run_artifact_names(run_tag: str) -> None:
+	if "TransE" in config._config:
+		config._config["TransE"]["model_file"] = f"{run_tag}_TransE.mdl"
+	if "DirectAU_KG" in config._config:
+		config._config["DirectAU_KG"]["model_file"] = f"{run_tag}_DirectAU.mdl"
 
 def load_config(args: argparse.Namespace) -> None:
 	if os.path.exists(args.config):
@@ -243,12 +215,16 @@ def train_and_evaluate(
 		valid_metrics = model.test_link(valid_triplets, eval_heads_valid, eval_tails_valid, filt=True)
 		return float(valid_metrics["mrr"])
 
+	# Time the training
+	total_start = time.time()
+	train_start = time.time()
 	best_valid_mrr, best_epoch = model.train(
 		train_triplets,
 		corrupter,
 		valid_link_tester,
 		early_stop_patience=early_stop_patience,
 	)
+	train_time = time.time() - train_start
 
 	link_metrics = model.test_link(test_triplets, eval_heads_test, eval_tails_test, filt=True)
 
@@ -257,6 +233,8 @@ def train_and_evaluate(
 
 	test_h, test_r, test_t, test_y = test_cls
 	cls_metrics = model.test_classification(test_h, test_r, test_t, test_y, thresholds)
+	
+	total_time = time.time() - total_start
 
 	return ExperimentResult(
 		model_name=model_name,
@@ -264,14 +242,20 @@ def train_and_evaluate(
 		best_epoch=best_epoch,
 		link_metrics=link_metrics,
 		cls_metrics=cls_metrics,
+		train_time=train_time,
+		total_time=total_time,
 	)
 
 def print_summary(results: Tuple[ExperimentResult, ...]) -> None:
-	lines = ["", "=== DirectAUKG Gamma Sweep On WN18RR ==="]
+	lines = ["", "=" * 80]
+	lines.append("TransE vs DirectAU TransE Performance Comparison")
+	lines.append("=" * 80)
+	
 	for res in results:
 		lines.append("")
 		lines.append(f"[{res.model_name}]")
 		lines.append(f"Best valid MRR: {res.best_valid_mrr:.4f} (epoch={res.best_epoch})")
+		lines.append(f"Training time: {res.train_time:.2f}s | Total time: {res.total_time:.2f}s")
 		lines.append(
 			"Link Prediction (test): "
 			f"MR={res.link_metrics['mr']:.4f}, "
@@ -289,7 +273,9 @@ def print_summary(results: Tuple[ExperimentResult, ...]) -> None:
 			f"PR-AUC={res.cls_metrics['pr_auc']:.4f}, "
 			f"ROC-AUC={res.cls_metrics['roc_auc']:.4f}"
 		)
-
+	
+	lines.append("")
+	lines.append("=" * 80)
 	for line in lines:
 		print(line)
 		if line:
@@ -298,9 +284,11 @@ def print_summary(results: Tuple[ExperimentResult, ...]) -> None:
 
 def main() -> None:
 	args = parse_args()
+	run_tag = time.strftime("%Y%m%d_%H%M%S")
 	set_seed(args.seed)
 	load_config(args)
-	log_file_path = setup_logging(args)
+	apply_run_artifact_names(run_tag)
+	log_file_path = setup_logging(args, run_tag)
 	if log_file_path:
 		logging.info("Writing logs to %s", log_file_path)
 
@@ -326,33 +314,44 @@ def main() -> None:
 	valid_cls = to_tensor_quadruples(read_data(paths["valid_cls"], kb_index, with_label=True))
 	test_cls = to_tensor_quadruples(read_data(paths["test_cls"], kb_index, with_label=True))
 
-	base_cfg = _clone_cfg(config._config)
 	results = []
-	for gamma_h, gamma_t, gamma_all_e, weight_decay, inverse_train, variant_cfg in build_direct_variant_configs(
-		base_cfg,
-		HYPERPARA_VARIANTS,
-	):
+	
+	# Train and evaluate each selected model
+	for model_type in args.models:
 		set_seed(args.seed)
-		config._config = variant_cfg
-		direct_model = DirectAUKG(n_entity, n_relation)
-		result = train_and_evaluate(
-			model_name=(
-				"DirectAUKG "
-				f"(gamma_h={gamma_h:g}, gamma_t={gamma_t:g}, gamma_all_e={gamma_all_e:g}, "
-				f"weight_decay={weight_decay:g}, inverse_train={inverse_train:g})"
-			),
-			model=direct_model,
-			train_triplets=train_triplets,
-			valid_triplets=valid_triplets,
-			test_triplets=test_triplets,
-			valid_cls=valid_cls,
-			test_cls=test_cls,
-			n_entity=n_entity,
-			early_stop_patience=args.early_stop_patience,
-		)
+		logging.info(f"\n{'='*80}")
+		logging.info(f"Training {model_type} model...")
+		logging.info(f"{'='*80}")
+		
+		if model_type == "TransE":
+			model = TransE(n_entity, n_relation)
+			result = train_and_evaluate(
+				model_name="TransE (Canonical)",
+				model=model,
+				train_triplets=train_triplets,
+				valid_triplets=valid_triplets,
+				test_triplets=test_triplets,
+				valid_cls=valid_cls,
+				test_cls=test_cls,
+				n_entity=n_entity,
+				early_stop_patience=args.early_stop_patience,
+			)
+		elif model_type == "DirectAU":
+			model = DirectAUKG(n_entity, n_relation)
+			result = train_and_evaluate(
+				model_name=f"DirectAU TransE (gamma={args.gamma})",
+				model=model,
+				train_triplets=train_triplets,
+				valid_triplets=valid_triplets,
+				test_triplets=test_triplets,
+				valid_cls=valid_cls,
+				test_cls=test_cls,
+				n_entity=n_entity,
+				early_stop_patience=args.early_stop_patience,
+			)
+		
 		results.append(result)
 
-	config._config = base_cfg
 	print_summary(tuple(results))
 
 

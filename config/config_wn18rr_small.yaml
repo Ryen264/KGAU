@@ -1,27 +1,22 @@
 test_batch_size: 10
 dataset: wn18rr
 task: all
-DirectAUKG:
+DirectAU_KG:
   optimizer: Adam
   learning_rate: 0.005
-  weight_decay: 0.0
-  inverse_train: 0.0
   dim: 50
-  gamma_h: 0.1
-  gamma_t: 0.1
-  gamma_all_e: 0.1
-  compose_mode: mul
+  gamma: 1.0
   n_epoch: 20
   batch_size: 256
   epoch_per_test: 5
-  model_file: DirectAUKG.mdl
+  model_file: DirectAU.mdl
 TransE:
   optimizer: Adam
   learning_rate: 0.005
   dim: 50
-  margin: 3
-  p: 1
-  temp: 1
+  margin: 1.0
+  p: 2
+  temp: 1.0
   n_epoch: 20
   batch_size: 256
   epoch_per_test: 5

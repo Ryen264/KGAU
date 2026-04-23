@@ -16,8 +16,6 @@ OPTIMIZER_MAP = {
     'RMSprop': RMSprop,
 }
 
-EPSILON = 1e-8
-
 class TransEModule(BaseModule):
     def __init__(self, n_entity: int, n_relation: int, config: config.config):
         super().__init__()
@@ -35,12 +33,13 @@ class TransEModule(BaseModule):
         self.init_weight()
 
     def init_weight(self) -> None:
-        for param in self.parameters():
-            param.data.normal_(0, 1 / param.size(1) ** 0.5)
-            param.data.renorm_(2, 0, 1)
+        init_range = 6.0 / (self.dim ** 0.5)
+        self.relation_embed.weight.data.uniform_(-init_range, init_range)
+        self.relation_embed.weight.data.renorm_(2, 0, 1)
+        self.entity_embed.weight.data.uniform_(-init_range, init_range)
 
     def forward(self, head: torch.Tensor, relation: torch.Tensor, tail: torch.Tensor) -> torch.Tensor:
-        return torch.norm(self.entity_embed(tail) - self.entity_embed(head) - self.relation_embed(relation) + EPSILON, p=self.p, dim=-1)
+        return torch.norm(self.entity_embed(head) + self.relation_embed(relation) - self.entity_embed(tail), p=self.p, dim=-1)
 
     def dist(self, head: torch.Tensor, relation: torch.Tensor, tail: torch.Tensor) -> torch.Tensor:
         return self.forward(head, relation, tail)
@@ -53,7 +52,6 @@ class TransEModule(BaseModule):
 
     def constraint(self) -> None:
         self.entity_embed.weight.data.renorm_(2, 0, 1)
-        self.relation_embed.weight.data.renorm_(2, 0, 1)
 
 class TransE(BaseModel):
     def __init__(self, n_entity: int, n_relation: int):
@@ -63,7 +61,7 @@ class TransE(BaseModel):
         self.model_path = os.path.join(self.task_dir, self.model_config.model_file)
 
         self.n_epoch = self.model_config.n_epoch
-        self.batch_size = getattr(self.model_config, 'batch_size', self.model_config.n_batch)
+        self.batch_size = self.model_config.get('batch_size', 128)
         self.epoch_per_test = self.model_config.epoch_per_test
 
         self.optimizer_name = self.model_config.optimizer
@@ -81,6 +79,7 @@ class TransE(BaseModel):
         n_train = len(head)
         best_perf = 0.0
         best_epoch = -1
+        best_state_dict = None
         patience_counter = 0
         for epoch in range(self.n_epoch):
             epoch_loss = 0
@@ -88,6 +87,7 @@ class TransE(BaseModel):
             head = head[rand_idx]
             relation = relation[rand_idx]
             tail = tail[rand_idx]
+            self.model.constraint()
             head_corrupted, tail_corrupted = corrupter.corrupt(head, relation, tail)
             head_device = head.to(config.device)
             relation_device = relation.to(config.device)
@@ -101,15 +101,14 @@ class TransE(BaseModel):
                 loss = torch.sum(self.model.pair_loss(h0, r, t0, h1, t1))
                 loss.backward()
                 self.opt.step()
-                self.model.constraint()
                 epoch_loss += loss.item()
             logging.info('Epoch %d/%d, Loss=%f', epoch + 1, self.n_epoch, epoch_loss / n_train)
             if ((self.n_epoch >= self.epoch_per_test) and ((epoch + 1) % self.epoch_per_test == 0)):
                 test_perf = tester()
                 if (test_perf > best_perf):
-                    self.save()
                     best_perf = test_perf
                     best_epoch = epoch + 1
+                    best_state_dict = {k: v.detach().cpu().clone() for k, v in self.model.state_dict().items()}
                     patience_counter = 0
                 else:
                     patience_counter += 1
@@ -117,5 +116,7 @@ class TransE(BaseModel):
                 if (early_stop_patience > 0 and patience_counter >= early_stop_patience):
                     logging.info('Early stopping triggered at epoch %d (patience=%d)', epoch + 1, early_stop_patience)
                     break
-        self.load(self.model_path)
+        if best_state_dict is not None:
+            self.model.load_state_dict(best_state_dict)
+        self.save(self.model_path)
         return best_perf, best_epoch

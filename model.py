@@ -23,11 +23,7 @@ class DirectAU_KGModule(BaseModule):
         self.model_type = 'DirectAU_KG'
 
         self.dim = config.dim
-        self.gamma_h = getattr(config, 'gamma_h', 1.0)
-        self.gamma_t = getattr(config, 'gamma_t', 1.0)
-        self.gamma_all_e = getattr(config, 'gamma_all_e', 1.0)
-        self.inverse_train = getattr(config, 'inverse_train', 0.0)
-        self.compose_mode = getattr(config, 'compose_mode', 'mul') # 'mul' (Hadamard) or 'add'
+        self.gamma = config.get('gamma', 1.0)  # Uniformity weight per algorithm
 
         self.n_entity, self.n_relation = n_entity, n_relation
         self.relation_embed = nn.Embedding(self.n_relation, self.dim)
@@ -36,54 +32,39 @@ class DirectAU_KGModule(BaseModule):
         self.init_weight()
 
     def init_weight(self) -> None:
-        for param in self.parameters():
-            # Standard initialization, but no renorm_ here since we enforce 
-            # strict projection to the unit hypersphere in the forward pass.
-            param.data.normal_(0, 1 / param.size(1) ** 0.5)
+        # Initialize embeddings with Uniform(-6/√k, 6/√k) per DirectAU algorithm
+        init_range = 6.0 / (self.dim ** 0.5)
+        self.relation_embed.weight.data.uniform_(-init_range, init_range)
+        self.entity_embed.weight.data.uniform_(-init_range, init_range)
 
     def _normalize(self, x: torch.Tensor) -> torch.Tensor:
         """Projects vectors onto the unit hypersphere."""
         return x / (x.norm(p=2, dim=-1, keepdim=True) + EPSILON)
 
     def _compose(self, h: torch.Tensor, r: torch.Tensor) -> torch.Tensor:
-        """Composes head and relation, then re-normalizes."""
-        if self.compose_mode == 'mul':
-            q_raw = h * r
-        else:
-            q_raw = h + r
+        """Composes head and relation via addition, then re-normalizes (per DirectAU algorithm)."""
+        q_raw = h + r
         return self._normalize(q_raw)
 
     def align_loss(self, head: torch.Tensor, relation: torch.Tensor, tail: torch.Tensor) -> torch.Tensor:
+        """Calculate alignment loss per DirectAU algorithm: sum of ||q - t||_2^2 for each triple."""
         h_emb = self._normalize(self.entity_embed(head))
         r_emb = self._normalize(self.relation_embed(relation))
         t_emb = self._normalize(self.entity_embed(tail))
 
         q = self._compose(h_emb, r_emb)
         
-        # ALIGN(x, y) = ||x - y||_2^2
-        return (q - t_emb).norm(p=2, dim=-1).pow(2).mean()
-
-    def inverse_align_loss(self, head: torch.Tensor, relation: torch.Tensor, tail: torch.Tensor) -> torch.Tensor:
-        h_emb = self._normalize(self.entity_embed(head))
-        r_emb = self._normalize(self.relation_embed(relation))
-        t_emb = self._normalize(self.entity_embed(tail))
-
-        if self.compose_mode == 'mul':
-            r_inv = 1.0 / (r_emb + EPSILON)
-        else:
-            r_inv = -1.0 * r_emb
-
-        q_inv = self._compose(t_emb, r_inv)
-        return (q_inv - h_emb).norm(p=2, dim=-1).pow(2).mean()
+        # Alignment loss = ||q - t||_2^2 per triple
+        return (q - t_emb).norm(p=2, dim=-1).pow(2)
 
     def uniformity_loss(self, unique_entities: torch.Tensor) -> torch.Tensor:
+        """Calculate batch uniformity loss per DirectAU algorithm using log Gaussian potential."""
         if unique_entities.numel() < 2:
             return torch.zeros((), device=unique_entities.device)
 
         e_emb = self._normalize(self.entity_embed(unique_entities))
         
-        # UNI(x) = log(mean(exp(-2 * ||x_i - x_j||_2^2)))
-        # torch.pdist computes flattened pairwise distances without the zero-diagonals
+        # Uniformity loss = log(mean(exp(-2 * ||e_i - e_j||_2^2))) over all pairs i != j
         dist_sq = torch.pdist(e_emb, p=2).pow(2)
         return dist_sq.mul(-2).exp().mean().log()
 
@@ -120,12 +101,12 @@ class DirectAUKG(BaseModel):
         self.model_path = os.path.join(self.task_dir, self.model_config.model_file)
 
         self.n_epoch = self.model_config.n_epoch
-        self.batch_size = getattr(self.model_config, 'batch_size', self.model_config.batch_size)
+        self.batch_size = self.model_config.get('batch_size', 128)
         self.epoch_per_test = self.model_config.epoch_per_test
 
         self.optimizer_name = self.model_config.optimizer
         self.lr = self.model_config.learning_rate
-        self.weight_decay = getattr(self.model_config, 'weight_decay', 0.0)
+        self.weight_decay = self.model_config.get('weight_decay', 0.0)
 
         self.model = DirectAU_KGModule(self.n_entity, self.n_relation, self.model_config)
         self.model.to(config.device)
@@ -135,11 +116,13 @@ class DirectAUKG(BaseModel):
 
     def train(self, train_data: Tuple[torch.Tensor, torch.Tensor, torch.Tensor],
               corrupter, tester, early_stop_patience: int=-1) -> tuple[float, int]:
+        """Train using DirectAU TransE algorithm: no negative sampling, alignment + uniformity loss."""
         
         head, relation, tail = train_data
         n_train = len(head)
         best_perf = 0.0
         best_epoch = -1
+        best_state_dict = None
         patience_counter = 0
 
         for epoch in range(self.n_epoch):
@@ -151,9 +134,10 @@ class DirectAUKG(BaseModel):
             relation = relation[rand_idx].to(config.device)
             tail = tail[rand_idx].to(config.device)
             
-            # Custom batching logic: We drop the corrupter and negative samples entirely
+            # Minibatch training per DirectAU algorithm
             for start_idx in range(0, n_train, self.batch_size):
                 end_idx = min(start_idx + self.batch_size, n_train)
+                batch_size = end_idx - start_idx
                 
                 h_batch = head[start_idx:end_idx]
                 r_batch = relation[start_idx:end_idx]
@@ -161,33 +145,22 @@ class DirectAUKG(BaseModel):
                 
                 self.model.zero_grad()
                 
-                # 1. Calculate Alignment Loss
-                loss_align = self.model.align_loss(h_batch, r_batch, t_batch)
-
-                # Optional inverse training on (r_inv, t) -> h
-                if self.model.inverse_train != 0.0:
-                    loss_inv_align = self.model.inverse_align_loss(h_batch, r_batch, t_batch)
-                else:
-                    loss_inv_align = torch.zeros((), device=config.device)
+                # Step 1: Calculate alignment loss for all triples in batch
+                loss_align_per_triple = self.model.align_loss(h_batch, r_batch, t_batch)
+                loss_align_total = loss_align_per_triple.sum()
                 
-                # 2. Calculate Uniformity Loss separately for head, tail, and all entities
-                unique_heads = h_batch.unique()
-                unique_tails = t_batch.unique()
-                unique_all_entities = torch.cat((h_batch, t_batch)).unique()
-                loss_uni_h = self.model.uniformity_loss(unique_heads)
-                loss_uni_t = self.model.uniformity_loss(unique_tails)
-                loss_uni_all_e = self.model.uniformity_loss(unique_all_entities)
+                # Step 2: Calculate uniformity loss over unique entities in batch
+                unique_entities = torch.cat((h_batch, t_batch)).unique()
+                loss_unif = self.model.uniformity_loss(unique_entities)
                 
-                # 3. Total DirectAU Loss
-                loss = loss_align + (self.model.inverse_train * loss_inv_align) \
-                    + (self.model.gamma_h * loss_uni_h) \
-                    + (self.model.gamma_t * loss_uni_t) \
-                    + (self.model.gamma_all_e * loss_uni_all_e) 
+                # Step 3: Normalize alignment loss by batch size and compute total loss
+                loss_align_normalized = loss_align_total / batch_size
+                loss = loss_align_normalized + (self.model.gamma * loss_unif)
                 
                 loss.backward()
                 self.opt.step()
                 
-                epoch_loss += loss.item() * (end_idx - start_idx)
+                epoch_loss += loss.item() * batch_size
 
             avg_loss = epoch_loss / n_train
             logging.info('Epoch %d/%d, Total Loss=%f', epoch + 1, self.n_epoch, avg_loss)
@@ -196,9 +169,9 @@ class DirectAUKG(BaseModel):
             if ((self.n_epoch >= self.epoch_per_test) and ((epoch + 1) % self.epoch_per_test == 0)):
                 test_perf = tester()
                 if (test_perf > best_perf):
-                    self.save()
                     best_perf = test_perf
                     best_epoch = epoch + 1
+                    best_state_dict = {k: v.detach().cpu().clone() for k, v in self.model.state_dict().items()}
                     patience_counter = 0
                 else:
                     patience_counter += 1
@@ -207,5 +180,7 @@ class DirectAUKG(BaseModel):
                 logging.info('Early stopping triggered at epoch %d (patience=%d)', epoch + 1, early_stop_patience)
                 break
                 
-        self.load(self.model_path)
+        if best_state_dict is not None:
+            self.model.load_state_dict(best_state_dict)
+        self.save(self.model_path)
         return best_perf, best_epoch
