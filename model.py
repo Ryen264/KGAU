@@ -38,6 +38,9 @@ class DirectAU_TransDModule(BaseModule):
         self.entity_proj_embed = nn.Embedding(self.n_entity, self.entity_dim)
         self.relation_proj_embed = nn.Embedding(self.n_relation, self.relation_dim)
 
+        # Relation attention mask weights w_r in relation space.
+        self.relation_attn_embed = nn.Embedding(self.n_relation, self.relation_dim)
+
         self.is_distance_based = True
         self.init_weight()
 
@@ -49,6 +52,7 @@ class DirectAU_TransDModule(BaseModule):
         self.relation_embed.weight.data.uniform_(-rel_range, rel_range)
         self.entity_proj_embed.weight.data.uniform_(-ent_range, ent_range)
         self.relation_proj_embed.weight.data.uniform_(-rel_range, rel_range)
+        self.relation_attn_embed.weight.data.uniform_(-rel_range, rel_range)
 
     def _normalize(self, x: torch.Tensor) -> torch.Tensor:
         """Strict L2 normalization used by DirectAU-TransD."""
@@ -86,6 +90,7 @@ class DirectAU_TransDModule(BaseModule):
         h_p = self.entity_proj_embed(head)
         t_p = self.entity_proj_embed(tail)
         r_p = self.relation_proj_embed(relation)
+        w_r = self.relation_attn_embed(relation)
 
         h_perp = self._project_entities(h, h_p, r_p)
         t_perp = self._project_entities(t, t_p, r_p)
@@ -94,7 +99,10 @@ class DirectAU_TransDModule(BaseModule):
         r_bar = self._normalize(r)
         t_bar = self._normalize(t_perp)
 
-        q = self._normalize(h_bar + r_bar)
+        # Attention mask on projected head in relation space, then strict re-normalization.
+        h_mask = self._normalize(h_bar * torch.sigmoid(w_r))
+
+        q = self._normalize(h_mask + r_bar)
         return q, t_bar
 
     def align_loss(self, head: torch.Tensor, relation: torch.Tensor, tail: torch.Tensor) -> torch.Tensor:
