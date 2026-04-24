@@ -9,7 +9,7 @@ from typing import Dict, Tuple
 import numpy as np
 import torch
 
-import config
+import config as config
 from data_loader import graph_size, index_entity_relation, read_data
 from datasets import BernCorrupter, sparse_heads_tails
 from model import DirectAUKG

@@ -6,7 +6,7 @@ from torch.optim import Adam
 import logging
 import os
 
-import config
+import config as config
 from datasets import batch_by_size
 from metrics import ranking_metrics, classification_metrics # Added classification_metrics
 

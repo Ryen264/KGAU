@@ -5,7 +5,7 @@ import os
 from typing import Tuple
 from torch.optim import Adam, SGD, Adagrad, RMSprop
 
-import config
+import config as config
 from base_model import BaseModule, BaseModel
 
 OPTIMIZER_MAP = {
@@ -27,6 +27,7 @@ class DirectAU_KGModule(BaseModule):
 
         self.n_entity, self.n_relation = n_entity, n_relation
         self.relation_embed = nn.Embedding(self.n_relation, self.dim)
+        self.relation_attn = nn.Embedding(self.n_relation, self.dim)
         self.entity_embed = nn.Embedding(self.n_entity, self.dim)
         self.is_distance_based = True
         self.init_weight()
@@ -35,15 +36,18 @@ class DirectAU_KGModule(BaseModule):
         # Initialize embeddings with Uniform(-6/√k, 6/√k) per DirectAU algorithm
         init_range = 6.0 / (self.dim ** 0.5)
         self.relation_embed.weight.data.uniform_(-init_range, init_range)
+        self.relation_attn.weight.data.uniform_(-init_range, init_range)
         self.entity_embed.weight.data.uniform_(-init_range, init_range)
 
     def _normalize(self, x: torch.Tensor) -> torch.Tensor:
         """Projects vectors onto the unit hypersphere."""
         return x / (x.norm(p=2, dim=-1, keepdim=True) + EPSILON)
 
-    def _compose(self, h: torch.Tensor, r: torch.Tensor) -> torch.Tensor:
-        """Composes head and relation via addition, then re-normalizes (per DirectAU algorithm)."""
-        q_raw = h + r
+    def _compose(self, h: torch.Tensor, r: torch.Tensor, w: torch.Tensor) -> torch.Tensor:
+        """Applies relation attention mask on head, then translates and re-normalizes."""
+        # Relation-specific attention mask: h_mask = normalize(h ⊙ sigmoid(w_r))
+        h_masked = self._normalize(h * torch.sigmoid(w))
+        q_raw = h_masked + r
         return self._normalize(q_raw)
 
     def align_loss(self, head: torch.Tensor, relation: torch.Tensor, tail: torch.Tensor) -> torch.Tensor:
@@ -51,8 +55,9 @@ class DirectAU_KGModule(BaseModule):
         h_emb = self._normalize(self.entity_embed(head))
         r_emb = self._normalize(self.relation_embed(relation))
         t_emb = self._normalize(self.entity_embed(tail))
+        w_rel = self.relation_attn(relation)
 
-        q = self._compose(h_emb, r_emb)
+        q = self._compose(h_emb, r_emb, w_rel)
         
         # Alignment loss = ||q - t||_2^2 per triple
         return (q - t_emb).norm(p=2, dim=-1).pow(2)
@@ -73,8 +78,9 @@ class DirectAU_KGModule(BaseModule):
         h_emb = self._normalize(self.entity_embed(head))
         r_emb = self._normalize(self.relation_embed(relation))
         t_emb = self._normalize(self.entity_embed(tail))
+        w_rel = self.relation_attn(relation)
         
-        q = self._compose(h_emb, r_emb)
+        q = self._compose(h_emb, r_emb, w_rel)
         return (q - t_emb).norm(p=2, dim=-1)
 
     def dist(self, head: torch.Tensor, relation: torch.Tensor, tail: torch.Tensor) -> torch.Tensor:

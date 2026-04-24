@@ -5,7 +5,7 @@ import os
 from typing import Tuple
 from torch.optim import Adam, SGD, Adagrad, RMSprop
 
-import config
+import config as config
 from base_model import BaseModule, BaseModel
 from datasets import batch_by_size
 
