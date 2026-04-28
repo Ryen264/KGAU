@@ -81,7 +81,7 @@ class DirectAU_KGModule(BaseModule):
         w_rel = self.relation_attn(relation)
         
         q = self._compose(h_emb, r_emb, w_rel)
-        return (q - t_emb).norm(p=2, dim=-1)
+        return (q - t_emb).norm(p=2, dim=-1).pow(2)
 
     def dist(self, head: torch.Tensor, relation: torch.Tensor, tail: torch.Tensor) -> torch.Tensor:
         return self.forward(head, relation, tail)
