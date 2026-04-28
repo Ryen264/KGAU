@@ -2,25 +2,24 @@ test_batch_size: 100
 dataset: wn18rr
 task: all
 DirectAU-KG:
-  optimizer: SGD
-  learning_rate: 0.01
+  optimizer: Adagrad
+  learning_rate: 0.1
   dim: 50
   gamma: 1.0
   n_epoch: 1000
-  batch_size: 200
+  batch_size: 3536
   epoch_per_test: 10
-  model_file: DirectAU-TransE.mdl
-TransE:
-  optimizer: SGD
-  learning_rate: 0.01
+  model_file: DirectAU-DistMult.mdl
+DistMult:
+  optimizer: Adagrad
+  learning_rate: 0.1
   dim: 50
-  margin: 2.0
-  p: 2
+  margin: 1.0
   temp: 1.0
   n_epoch: 1000
-  batch_size: 200
+  batch_size: 3536
   epoch_per_test: 10
-  model_file: TransE.mdl
+  model_file: DistMult.mdl
 log:
   dump_config: false
   to_file: true

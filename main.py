@@ -1,7 +1,9 @@
 import argparse
+import importlib
 import logging
 import os
 import random
+import sys
 import time
 from dataclasses import dataclass
 from typing import Dict, Tuple
@@ -12,8 +14,13 @@ import torch
 import config as config
 from data_loader import graph_size, index_entity_relation, read_data
 from datasets import BernCorrupter, sparse_heads_tails
-from model import DirectAUKG
-from transe import TransE
+
+CURRENT_DIR = os.path.dirname(os.path.abspath(__file__))
+if CURRENT_DIR not in sys.path:
+	sys.path.insert(0, CURRENT_DIR)
+
+DistMult = importlib.import_module("distmult").DistMult
+DirectAU_DistMult = importlib.import_module("model").DirectAU_DistMult
 
 
 @dataclass
@@ -28,7 +35,7 @@ class ExperimentResult:
 
 def parse_args() -> argparse.Namespace:
 	parser = argparse.ArgumentParser(
-		description="Train and compare TransE vs DirectAU-TransE."
+		description="Train and compare DistMult and DirectAU variants."
 	)
 	parser.add_argument(
 		"config_path",
@@ -49,8 +56,12 @@ def parse_args() -> argparse.Namespace:
 	parser.add_argument("--n_epoch", type=int, default=200, help="Training epochs.")
 	parser.add_argument("--batch_size", type=int, default=128, help="Training batch size.")
 	parser.add_argument("--lr", type=float, default=1e-3, help="Learning rate.")
-	parser.add_argument("--gamma", type=float, default=1.0, help="Uniformity weight for DirectAU-TransE.")
-	parser.add_argument("--models", nargs="+", default=["TransE", "DirectAU-KG"], choices=["TransE", "DirectAU-KG"],
+	parser.add_argument("--gamma", type=float, default=1.0, help="Uniformity weight for DirectAU models.")
+	parser.add_argument(
+		"--models",
+		nargs="+",
+		default=["DistMult", "DirectAU-DistMult"],
+		choices=["DistMult", "DirectAU-DistMult"],
 		help="Models to train and compare.")
 
 	args = parser.parse_args()
@@ -72,7 +83,7 @@ def setup_logging(args: argparse.Namespace, run_tag: str) -> str:
 	if not args.no_log_to_file:
 		log_task_dir = os.path.join(args.log_dir, args.dataset, "comparison")
 		os.makedirs(log_task_dir, exist_ok=True)
-		log_file_path = os.path.join(log_task_dir, f"{run_tag}_DirectAU-TransE.log")
+		log_file_path = os.path.join(log_task_dir, f"{run_tag}_DirectAU-DistMult.log")
 		file_handler = logging.FileHandler(log_file_path, mode="w")
 		file_handler.setFormatter(formatter)
 		root_logger.addHandler(file_handler)
@@ -112,20 +123,19 @@ def build_runtime_config(args: argparse.Namespace) -> None:
 			"dump_config": False,
 			"prefix": "kgau",
 		},
-		"TransE": {
-			"model_file": "TransE.mdl",
+		"DistMult": {
+			"model_file": "DistMult.mdl",
 			"n_epoch": args.n_epoch,
 			"batch_size": args.batch_size,
 			"epoch_per_test": 5,
-			"optimizer": "Adam",
+			"optimizer": "Adagrad",
 			"learning_rate": args.lr,
 			"margin": 1.0,
-			"p": 2,
 			"dim": args.dim,
 			"temp": 1.0,
 		},
-		"DirectAU-KG": {
-			"model_file": "DirectAU-KG.mdl",
+		"DirectAU-DistMult": {
+			"model_file": "DirectAU-DistMult.mdl",
 			"n_epoch": args.n_epoch,
 			"batch_size": args.batch_size,
 			"epoch_per_test": 5,
@@ -133,15 +143,16 @@ def build_runtime_config(args: argparse.Namespace) -> None:
 			"learning_rate": args.lr,
 			"dim": args.dim,
 			"gamma": args.gamma,
+			"temp": 1.0,
 		},
 	}
 	config._config = _to_cfg(runtime_cfg)
 
 def apply_run_artifact_names(run_tag: str) -> None:
-	if "TransE" in config._config:
-		config._config["TransE"]["model_file"] = f"{run_tag}_TransE.mdl"
-	if "DirectAU-KG" in config._config:
-		config._config["DirectAU-KG"]["model_file"] = f"{run_tag}_DirectAU-TransE.mdl"
+	if "DistMult" in config._config:
+		config._config["DistMult"]["model_file"] = f"{run_tag}_DistMult.mdl"
+	if "DirectAU-DistMult" in config._config:
+		config._config["DirectAU-DistMult"]["model_file"] = f"{run_tag}_DirectAU-DistMult.mdl"
 
 def load_config(args: argparse.Namespace) -> None:
 	if os.path.exists(args.config):
@@ -152,12 +163,16 @@ def load_config(args: argparse.Namespace) -> None:
 			if isinstance(section_cfg, dict) and "batch_size" not in section_cfg and "n_batch" in section_cfg:
 				section_cfg["batch_size"] = section_cfg["n_batch"]
 
-		# Backward-compatibility: model code expects DirectAU-KG.
-		if "DirectAU-KG" not in cfg:
-			if "DirectAUKG" in cfg:
-				cfg["DirectAU-KG"] = cfg["DirectAUKG"]
+		# Backward-compatibility: normalize older DirectAU names.
+		if "DirectAU-DistMult" not in cfg:
+			if "DirectAU-KG" in cfg:
+				cfg["DirectAU-DistMult"] = cfg["DirectAU-KG"]
+			elif "DirectAUKG" in cfg:
+				cfg["DirectAU-DistMult"] = cfg["DirectAUKG"]
+			elif "DistMult" in cfg:
+				cfg["DirectAU-DistMult"] = cfg["DistMult"]
 			else:
-				raise KeyError("Config must contain 'DirectAU-KG' or 'DirectAUKG'.")
+				raise KeyError("Config must contain 'DistMult' or 'DirectAU-DistMult' (or a legacy DirectAU alias).")
 
 		if "dataset" in cfg:
 			args.dataset = cfg["dataset"]
@@ -248,7 +263,7 @@ def train_and_evaluate(
 
 def print_summary(results: Tuple[ExperimentResult, ...]) -> None:
 	lines = ["", "=" * 80]
-	lines.append("TransE vs DirectAU-TransE Performance Comparison")
+	lines.append("DistMult vs DirectAU-DistMult Performance Comparison")
 	lines.append("=" * 80)
 	
 	for res in results:
@@ -323,10 +338,10 @@ def main() -> None:
 		logging.info(f"Training {model_type} model...")
 		logging.info(f"{'='*80}")
 		
-		if model_type == "TransE":
-			model = TransE(n_entity, n_relation)
+		if model_type == "DistMult":
+			model = DistMult(n_entity, n_relation)
 			result = train_and_evaluate(
-				model_name="TransE (Canonical)",
+				model_name="DistMult (Canonical)",
 				model=model,
 				train_triplets=train_triplets,
 				valid_triplets=valid_triplets,
@@ -336,10 +351,10 @@ def main() -> None:
 				n_entity=n_entity,
 				early_stop_patience=args.early_stop_patience,
 			)
-		elif model_type == "DirectAU-KG":
-			model = DirectAUKG(n_entity, n_relation)
+		elif model_type == "DirectAU-DistMult":
+			model = DirectAU_DistMult(n_entity, n_relation)
 			result = train_and_evaluate(
-				model_name=f"DirectAU-TransE (gamma={args.gamma})",
+				model_name=f"DirectAU-DistMult (gamma={args.gamma})",
 				model=model,
 				train_triplets=train_triplets,
 				valid_triplets=valid_triplets,
