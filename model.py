@@ -123,7 +123,7 @@ class DirectAU_TransDModule(BaseModule):
     def forward(self, head: torch.Tensor, relation: torch.Tensor, tail: torch.Tensor) -> torch.Tensor:
         # Inference distance follows the same aligned geometry used in training.
         q, t_bar = self._aligned_components(head, relation, tail)
-        return (q - t_bar).norm(p=2, dim=-1)
+        return (q - t_bar).norm(p=2, dim=-1).pow(2)
 
     def dist(self, head: torch.Tensor, relation: torch.Tensor, tail: torch.Tensor) -> torch.Tensor:
         return self.forward(head, relation, tail)
