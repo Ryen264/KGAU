@@ -25,8 +25,12 @@ class DirectAU_DistMultModule(BaseModule):
 		self.model_type = 'DistMult'
 
 		self.dim = config.dim
-		self.gamma = config.get('gamma', 1.0)
-		self.temp = config.get('temp', 1.0)
+		self.gamma = getattr(config, 'gamma', config.get('gamma', 1.0))
+		self.temp = getattr(config, 'temp', config.get('temp', 1.0))
+		# Numeric epsilon used to stabilize log and normalization
+		self.epsilon = getattr(config, 'epsilon', config.get('epsilon', EPSILON))
+		# Initialization range (uniform in [-init_range, init_range])
+		self.init_range = getattr(config, 'init_range', config.get('init_range', 6.0 / (self.dim ** 0.5)))
 
 		self.n_entity, self.n_relation = n_entity, n_relation
 		self.entity_embed = nn.Embedding(self.n_entity, self.dim)
@@ -36,13 +40,13 @@ class DirectAU_DistMultModule(BaseModule):
 		self.init_weight()
 
 	def init_weight(self) -> None:
-		init_range = 6.0 / (self.dim ** 0.5)
+		init_range = float(self.init_range)
 		self.entity_embed.weight.data.uniform_(-init_range, init_range)
 		self.relation_embed.weight.data.uniform_(-init_range, init_range)
 		self.relation_attn.weight.data.uniform_(-init_range, init_range)
 
 	def _normalize(self, x: torch.Tensor) -> torch.Tensor:
-		return x / (x.norm(p=2, dim=-1, keepdim=True) + EPSILON)
+		return x / (x.norm(p=2, dim=-1, keepdim=True) + float(self.epsilon))
 
 	def _compose(self, h: torch.Tensor, r: torch.Tensor, w: torch.Tensor) -> torch.Tensor:
 		h_mask = self._normalize(h * torch.sigmoid(w))
@@ -68,7 +72,8 @@ class DirectAU_DistMultModule(BaseModule):
 
 		e_emb = self._normalize(self.entity_embed(unique_entities))
 		dist_sq = torch.pdist(e_emb, p=2).pow(2)
-		return dist_sq.mul(-2).exp().mean().log()
+		# add epsilon to prevent log(0) when numerical underflow occurs
+		return torch.log(torch.exp(-2.0 * dist_sq).mean() + float(self.epsilon))
 
 	def forward(self, head: torch.Tensor, relation: torch.Tensor, tail: torch.Tensor) -> torch.Tensor:
 		q, t = self._aligned_components(head, relation, tail)
