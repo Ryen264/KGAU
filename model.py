@@ -49,12 +49,7 @@ class DirectAU_DistMultModule(BaseModule):
 		q_raw = h_mask * r
 		return self._normalize(q_raw)
 
-	def _aligned_components(
-		self,
-		head: torch.Tensor,
-		relation: torch.Tensor,
-		tail: torch.Tensor,
-	) -> Tuple[torch.Tensor, torch.Tensor]:
+	def _aligned_components(self, head: torch.Tensor, relation: torch.Tensor, tail: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
 		h = self._normalize(self.entity_embed(head))
 		r = self._normalize(self.relation_embed(relation))
 		t = self._normalize(self.entity_embed(tail))

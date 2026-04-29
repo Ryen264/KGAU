@@ -21,7 +21,7 @@ def ranking_metrics(scores: torch.Tensor, target: int, k_list: list=[1, 3, 10]) 
     Returns:
         Dictionary with keys: 'mr', 'mrr', 'hits', 'target_score'
     """
-    _, sorted_idx = torch.sort(scores)
+    _, sorted_idx = torch.sort(scores, descending=False)
     find_target = sorted_idx == target
 
     target_rank = int(torch.nonzero(find_target)[0, 0] + 1)
