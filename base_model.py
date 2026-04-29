@@ -155,11 +155,11 @@ class BaseModel(object):
         # 1. Find Global Threshold
         thresholds['global'] = get_best_thresh(scores, labels)
         
-        # 2. Find Relation-Specific Thresholds
-        unique_relations = torch.unique(relations)
-        for r in unique_relations:
-            r_mask = (relations == r)
-            thresholds[r.item()] = get_best_thresh(scores[r_mask], labels[r_mask])
+        # # 2. Find Relation-Specific Thresholds
+        # unique_relations = torch.unique(relations)
+        # for r in unique_relations:
+        #     r_mask = (relations == r)
+        #     thresholds[r.item()] = get_best_thresh(scores[r_mask], labels[r_mask])
             
         if threshold_candidates is not None:
             logging.info(
