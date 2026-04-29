@@ -6,7 +6,7 @@ DirectAUKG:
   learning_rate: 0.00003
   dim: 384
   gamma: 1.0
-  encoder_name: sentence-transformers/all-MiniLM-L6-v2
+  encoder_name: distilbert-base-uncased
   max_length: 64
   encode_batch_size: 14
   compose_mode: add
