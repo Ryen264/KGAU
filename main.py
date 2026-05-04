@@ -438,34 +438,61 @@ def main() -> None:
 	paths = build_paths(args)
 	validate_paths(paths)
 
-	kb_index = index_entity_relation(
-		paths["train"],
-		paths["valid_w_label"],
-		paths["test_w_label"],
-	)
-	n_entity, n_relation = graph_size(kb_index)
+
+		# Load preprocessed data
+	import json
+	dataset_dir = os.path.dirname(paths["train"])
+	with open(os.path.join(dataset_dir, "train.txt.json"), encoding="utf-8") as f:
+		train_examples = json.load(f)
+	with open(os.path.join(dataset_dir, "valid_w_label.txt.json"), encoding="utf-8") as f:
+		valid_examples = json.load(f)
+	with open(os.path.join(dataset_dir, "test_w_label.txt.json"), encoding="utf-8") as f:
+		test_examples = json.load(f)
+
+	# Entities and relations
+	with open(os.path.join(dataset_dir, "entities.json"), encoding="utf-8") as f:
+		entities = json.load(f)
+	with open(os.path.join(dataset_dir, "relations.json"), encoding="utf-8") as f:
+		relation_map = json.load(f)
+
+	n_entity = len(entities)
+	n_relation = len(relation_map)
 	logging.info("Graph size: n_entity=%d, n_relation=%d", n_entity, n_relation)
-	entity_texts, relation_texts = build_text_corpora(args, kb_index)
 
-	train_triplets = to_tensor_triplets(read_data(paths["train"], kb_index))
-	valid_w_label_lists = read_data(paths["valid_w_label"], kb_index, with_label=True)
-	test_w_label_lists = read_data(paths["test_w_label"], kb_index, with_label=True)
-	valid_labels = valid_w_label_lists[3]
-	test_labels = test_w_label_lists[3]
-	logging.info(
-		"Loaded validation/test with labels: valid=%d (pos=%d, neg=%d), test=%d (pos=%d, neg=%d)",
-		len(valid_labels),
-		sum(1 for y in valid_labels if y == 1),
-		sum(1 for y in valid_labels if y == 0),
-		len(test_labels),
-		sum(1 for y in test_labels if y == 1),
-		sum(1 for y in test_labels if y == 0),
-	)
+	entity_texts = [e["entity_desc"] if "entity_desc" in e else e["entity"] for e in entities]
+	relation_texts = list(relation_map.values())
 
-	valid_triplets = to_tensor_triplets(convert_data_to_no_label(valid_w_label_lists))
-	test_triplets = to_tensor_triplets(convert_data_to_no_label(test_w_label_lists))
-	valid_cls_triplets = to_tensor_triplets_with_labels(valid_w_label_lists)
-	test_cls_triplets = to_tensor_triplets_with_labels(test_w_label_lists)
+	# Helper to convert list of dicts to tensors
+	def examples_to_triplets(examples):
+		h = [e["head_id"] for e in examples]
+		r = [e["relation"] for e in examples]
+		t = [e["tail_id"] for e in examples]
+		return h, r, t
+
+	# Build id mapping
+	entity_id_map = {e["entity_id"]: idx for idx, e in enumerate(entities)}
+	relation_id_map = {v: idx for idx, v in enumerate(relation_map.values())}
+
+	def encode_triplets(examples):
+		h, r, t = examples_to_triplets(examples)
+		h = [entity_id_map[x] for x in h]
+		r = [relation_id_map[x] for x in r]
+		t = [entity_id_map[x] for x in t]
+		return torch.LongTensor(h), torch.LongTensor(r), torch.LongTensor(t)
+
+	def encode_triplets_with_labels(examples):
+		h, r, t = examples_to_triplets(examples)
+		y = [e["label"] if "label" in e else 1 for e in examples]
+		h = [entity_id_map[x] for x in h]
+		r = [relation_id_map[x] for x in r]
+		t = [entity_id_map[x] for x in t]
+		return torch.LongTensor(h), torch.LongTensor(r), torch.LongTensor(t), torch.LongTensor(y)
+
+	train_triplets = encode_triplets(train_examples)
+	valid_triplets = encode_triplets(valid_examples)
+	test_triplets = encode_triplets(test_examples)
+	valid_cls_triplets = encode_triplets_with_labels(valid_examples)
+	test_cls_triplets = encode_triplets_with_labels(test_examples)
 
 	direct_model = DirectAUKG(n_entity, n_relation, entity_texts, relation_texts)
 
