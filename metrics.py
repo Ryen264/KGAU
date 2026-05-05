@@ -9,7 +9,7 @@ def mrr_mr_hitk(scores, target, k=10):
     target_rank = torch.nonzero(find_target)[0, 0] + 1
     return 1 / target_rank, target_rank, int(target_rank <= k)
 
-def ranking_metrics(scores: torch.Tensor, target: int, k_list: list=[1, 3, 10]) -> Dict[str, Union[int, float, list]]:
+def ranking_metrics(scores: torch.Tensor, target: int, k_list: list=[1, 3, 10], higher_is_better: bool=False) -> Dict[str, Union[int, float, list]]:
     """
     Compute link prediction metrics (MR, MRR, Hits@K).
     
@@ -21,7 +21,7 @@ def ranking_metrics(scores: torch.Tensor, target: int, k_list: list=[1, 3, 10]) 
     Returns:
         Dictionary with keys: 'mr', 'mrr', 'hits', 'target_score'
     """
-    _, sorted_idx = torch.sort(scores)
+    _, sorted_idx = torch.sort(scores, descending=higher_is_better)
     find_target = sorted_idx == target
 
     target_rank = int(torch.nonzero(find_target)[0, 0] + 1)

@@ -194,6 +194,7 @@ class BaseModel(object):
         hits_total = [0] * len(k_list)
         test_data_no_label = test_data[:3]
         count = 0
+        higher_is_better = not self.model.is_distance_based
         with torch.no_grad():
             for batch_head, batch_relation, batch_tail in batch_by_size(self.test_batch_size, *test_data_no_label):
                 batch_size = batch_head.size(0)
@@ -215,17 +216,29 @@ class BaseModel(object):
                         key_head = (tail_id, relation_id)
                         if key_head in heads and heads[key_head]._nnz() > 1:
                             tmp = head_scores[head_id].item()
-                            head_scores += heads[key_head].to(config.device) * FILTER_RANKING_PENALTY
+                            penalty = heads[key_head].to(config.device) * FILTER_RANKING_PENALTY
+                            head_scores = head_scores - penalty if higher_is_better else head_scores + penalty
                             head_scores[head_id] = tmp
                             
                         key_tail = (head_id, relation_id)
                         if key_tail in tails and tails[key_tail]._nnz() > 1:
                             tmp = tail_scores[tail_id].item()
-                            tail_scores += tails[key_tail].to(config.device) * FILTER_RANKING_PENALTY
+                            penalty = tails[key_tail].to(config.device) * FILTER_RANKING_PENALTY
+                            tail_scores = tail_scores - penalty if higher_is_better else tail_scores + penalty
                             tail_scores[tail_id] = tmp
 
-                    head_metrics = ranking_metrics(head_scores, head_id, k_list=k_list)
-                    tail_metrics = ranking_metrics(tail_scores, tail_id, k_list=k_list)
+                    head_metrics = ranking_metrics(
+                        head_scores,
+                        head_id,
+                        k_list=k_list,
+                        higher_is_better=higher_is_better,
+                    )
+                    tail_metrics = ranking_metrics(
+                        tail_scores,
+                        tail_id,
+                        k_list=k_list,
+                        higher_is_better=higher_is_better,
+                    )
 
                     head_mr = head_metrics['mr']
                     head_mrr = head_metrics['mrr']

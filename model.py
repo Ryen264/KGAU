@@ -23,13 +23,14 @@ class DirectAU_KGModule(BaseModule):
         self.model_type = 'DirectAU-KG'
 
         self.dim = config.dim
-        self.gamma = config.get('gamma', 1.0)  # Uniformity weight per algorithm
+        # configuration values are read at the higher-level model wrapper
 
         self.n_entity, self.n_relation = n_entity, n_relation
         self.relation_embed = nn.Embedding(self.n_relation, self.dim)
         self.relation_attn = nn.Embedding(self.n_relation, self.dim)
         self.entity_embed = nn.Embedding(self.n_entity, self.dim)
-        self.is_distance_based = True
+        # Inference uses dot-product on normalized vectors (higher is better)
+        self.is_distance_based = False
         self.init_weight()
 
     def init_weight(self) -> None:
@@ -71,7 +72,7 @@ class DirectAU_KGModule(BaseModule):
         
         # Uniformity loss = log(mean(exp(-2 * ||e_i - e_j||_2^2))) over all pairs i != j
         dist_sq = torch.pdist(e_emb, p=2).pow(2)
-        return dist_sq.mul(-2).exp().mean().log()
+        return (dist_sq.mul(-2).exp().mean() + EPSILON).log()
 
     def forward(self, head: torch.Tensor, relation: torch.Tensor, tail: torch.Tensor) -> torch.Tensor:
         # Inference distance used for scoring in link prediction / triple classification
@@ -81,18 +82,29 @@ class DirectAU_KGModule(BaseModule):
         w_rel = self.relation_attn(relation)
         
         q = self._compose(h_emb, r_emb, w_rel)
+        # Return squared L2 distance (useful for training alignment loss)
         return (q - t_emb).norm(p=2, dim=-1).pow(2)
 
     def dist(self, head: torch.Tensor, relation: torch.Tensor, tail: torch.Tensor) -> torch.Tensor:
         return self.forward(head, relation, tail)
 
     def score(self, head: torch.Tensor, relation: torch.Tensor, tail: torch.Tensor) -> torch.Tensor:
-        return self.forward(head, relation, tail)
+        # Dot-product scoring between normalized composed query and candidate embeddings.
+        # Supports broadcasted / chunked inference where `head`, `relation`, `tail`
+        # can be shaped like [batch, n_candidates].
+        h_emb = self._normalize(self.entity_embed(head))
+        r_emb = self._normalize(self.relation_embed(relation))
+        t_emb = self._normalize(self.entity_embed(tail))
+        w_rel = self.relation_attn(relation)
+
+        q = self._compose(h_emb, r_emb, w_rel)
+        return (q * t_emb).sum(dim=-1)
 
     def prob_logit(self, head: torch.Tensor, relation: torch.Tensor, tail: torch.Tensor) -> torch.Tensor:
         # If your tester relies on temp scaling for logits
         temp = getattr(self, 'temp', 1.0)
-        return -self.forward(head, relation ,tail) / temp
+        # Use dot-product logits (higher = more likely positive)
+        return self.score(head, relation, tail) / temp
 
     def constraint(self) -> None:
         # Constraints are handled dynamically via L2 normalization during the forward pass.
@@ -113,6 +125,11 @@ class DirectAUKG(BaseModel):
         self.optimizer_name = self.model_config.optimizer
         self.lr = self.model_config.learning_rate
         self.weight_decay = self.model_config.get('weight_decay', 0.0)
+
+        # Algorithm hyperparameters: support backward-compatible keys
+        self.gamma_uni = self.model_config.get('gamma_uni', self.model_config.get('gamma', 1.0))
+        self.gamma_neg = self.model_config.get('gamma_neg', 0.0)
+        self.epsilon = self.model_config.get('epsilon', EPSILON)
 
         self.model = DirectAU_KGModule(self.n_entity, self.n_relation, self.model_config)
         self.model.to(config.device)
@@ -161,7 +178,35 @@ class DirectAUKG(BaseModel):
                 
                 # Step 3: Normalize alignment loss by batch size and compute total loss
                 loss_align_normalized = loss_align_total / batch_size
-                loss = loss_align_normalized + (self.model.gamma * loss_unif)
+
+                # Optional negative loss (if corrupter provided and gamma_neg > 0)
+                loss_neg = torch.tensor(0.0, device=config.device)
+                if (self.gamma_neg > 0.0) and (corrupter is not None):
+                    # Generate corrupted candidates on CPU (datasets often return CPU tensors)
+                    h_corrupt, t_corrupt = corrupter.corrupt(h_batch.cpu(), r_batch.cpu(), t_batch.cpu())
+                    h_corrupt = h_corrupt.to(config.device)
+                    t_corrupt = t_corrupt.to(config.device)
+                    # q computed from positive head & relation
+                    h_emb = self.model._normalize(self.model.entity_embed(h_batch))
+                    r_emb = self.model._normalize(self.model.relation_embed(r_batch))
+                    w_rel = self.model.relation_attn(r_batch)
+                    q = self.model._compose(h_emb, r_emb, w_rel)
+
+                    # Handle single negative per sample (1D) or multiple (2D)
+                    if t_corrupt.dim() == 1:
+                        t_neg_emb = self.model._normalize(self.model.entity_embed(t_corrupt))
+                        d_neg = (q - t_neg_emb).norm(p=2, dim=-1).pow(2)
+                        loss_neg = (torch.exp(-2.0 * d_neg).mean() + self.epsilon).log()
+                    else:
+                        # shape: [batch, n_neg]
+                        t_neg_emb = self.model._normalize(self.model.entity_embed(t_corrupt))
+                        # expand q to [batch, 1, dim]
+                        q_exp = q.unsqueeze(1)
+                        d_neg = (q_exp - t_neg_emb).norm(p=2, dim=-1).pow(2)
+                        per_sample = (torch.exp(-2.0 * d_neg).mean(dim=1) + self.epsilon).log()
+                        loss_neg = per_sample.mean()
+
+                loss = loss_align_normalized + (self.gamma_uni * loss_unif) + (self.gamma_neg * loss_neg)
                 
                 loss.backward()
                 self.opt.step()

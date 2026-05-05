@@ -6,7 +6,7 @@ DirectAU-KG:
   learning_rate: 0.01
   dim: 50
   gamma: 1.0
-  n_epoch: 1000
+  n_epoch: 100
   batch_size: 200
   epoch_per_test: 10
   model_file: DirectAU-TransE.mdl
@@ -17,7 +17,7 @@ TransE:
   margin: 2.0
   p: 2
   temp: 1.0
-  n_epoch: 1000
+  n_epoch: 100
   batch_size: 200
   epoch_per_test: 10
   model_file: TransE.mdl
