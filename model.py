@@ -45,8 +45,8 @@ class DirectAU_KGModule(BaseModule):
         return x / (x.norm(p=2, dim=-1, keepdim=True) + EPSILON)
 
     def _compose(self, h: torch.Tensor, r: torch.Tensor, w: torch.Tensor) -> torch.Tensor:
-        """Applies relation attention mask on head, then translates and re-normalizes."""
-        # Relation-specific attention mask: h_mask = normalize(h ⊙ sigmoid(w_r))
+        """Applies relation attention mask on head, then translates and normalizes the query."""
+        # Relation-specific attention mask: h_mask = h ⊙ sigmoid(w_r)
         h_masked = self._normalize(h * torch.sigmoid(w))
         q_raw = h_masked + r
         return self._normalize(q_raw)

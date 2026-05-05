@@ -49,7 +49,7 @@ def parse_args() -> argparse.Namespace:
 	parser.add_argument("--n_epoch", type=int, default=200, help="Training epochs.")
 	parser.add_argument("--batch_size", type=int, default=128, help="Training batch size.")
 	parser.add_argument("--lr", type=float, default=1e-3, help="Learning rate.")
-	parser.add_argument("--gamma", type=float, default=1.0, help="Uniformity weight for DirectAU-TransE.")
+	parser.add_argument("--gamma", type=float, default=None, help="Uniformity weight for DirectAU-TransE (overrides config when set).")
 	parser.add_argument("--models", nargs="+", default=["TransE", "DirectAU-KG"], choices=["TransE", "DirectAU-KG"],
 		help="Models to train and compare.")
 
@@ -103,6 +103,7 @@ def _clone_cfg(cfg):
 
 
 def build_runtime_config(args: argparse.Namespace) -> None:
+	effective_gamma = args.gamma if args.gamma is not None else 1.0
 	runtime_cfg = {
 		"dataset": args.dataset,
 		"task": "comparison",
@@ -132,7 +133,7 @@ def build_runtime_config(args: argparse.Namespace) -> None:
 			"optimizer": "Adam",
 			"learning_rate": args.lr,
 			"dim": args.dim,
-			"gamma": args.gamma,
+			"gamma": effective_gamma,
 		},
 	}
 	config._config = _to_cfg(runtime_cfg)
@@ -163,9 +164,16 @@ def load_config(args: argparse.Namespace) -> None:
 			args.dataset = cfg["dataset"]
 		if "test_batch_size" not in cfg:
 			cfg["test_batch_size"] = args.test_batch_size
+
+		# If CLI did not override gamma, inherit from config for user-facing labels/summary.
+		if args.gamma is None:
+			direct_cfg = cfg.get("DirectAU-KG", {})
+			args.gamma = direct_cfg.get("gamma_uni", direct_cfg.get("gamma", 1.0))
 	else:
 		logging.warning("Config file not found at %s. Falling back to runtime defaults.", args.config)
 		build_runtime_config(args)
+		if args.gamma is None:
+			args.gamma = 1.0
 
 def build_paths(args: argparse.Namespace) -> Dict[str, str]:
 	base_dir = os.path.join(args.data_root, args.dataset)
