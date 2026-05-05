@@ -4,7 +4,7 @@ task: all
 DirectAU-KG:
   optimizer: SGD
   learning_rate: 0.01
-  dim: 50
+  dim: 100
   gamma: 0.1
   n_epoch: 1000
   batch_size: 200
