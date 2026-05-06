@@ -28,6 +28,7 @@ class DirectAU_KGModule(BaseModule):
         self.n_entity, self.n_relation = n_entity, n_relation
         self.relation_embed = nn.Embedding(self.n_relation, self.dim)
         self.relation_attn = nn.Embedding(self.n_relation, self.dim)
+        self.relation_attn_bias = nn.Embedding(self.n_relation, self.dim)
         self.entity_embed = nn.Embedding(self.n_entity, self.dim)
         # Inference uses dot-product on normalized vectors (higher is better)
         self.is_distance_based = False
@@ -37,17 +38,19 @@ class DirectAU_KGModule(BaseModule):
         # Initialize embeddings with Uniform(-6/√k, 6/√k) per DirectAU algorithm
         init_range = 6.0 / (self.dim ** 0.5)
         self.relation_embed.weight.data.uniform_(-init_range, init_range)
-        self.relation_attn.weight.data.uniform_(-init_range, init_range)
+        self.relation_attn.weight.data.fill_(2.0)
+        self.relation_attn_bias.weight.data.zero_()
         self.entity_embed.weight.data.uniform_(-init_range, init_range)
 
     def _normalize(self, x: torch.Tensor) -> torch.Tensor:
         """Projects vectors onto the unit hypersphere."""
         return x / (x.norm(p=2, dim=-1, keepdim=True) + EPSILON)
 
-    def _compose(self, h: torch.Tensor, r: torch.Tensor, w: torch.Tensor) -> torch.Tensor:
-        """Applies relation attention mask on head, then translates and re-normalizes."""
-        # Relation-specific attention mask: h_mask = normalize(h ⊙ sigmoid(w_r))
-        h_masked = self._normalize(h * torch.sigmoid(w))
+    def _compose(self, h: torch.Tensor, r: torch.Tensor, w: torch.Tensor, b: torch.Tensor) -> torch.Tensor:
+        """Applies relation-conditioned attention mask on head, then translates and normalizes."""
+        # Relation-conditioned gate: m_r = sigmoid(w_r ⊙ r + b_r)
+        m = torch.sigmoid(w * r + b)
+        h_masked = h * m
         q_raw = h_masked + r
         return self._normalize(q_raw)
 
@@ -57,8 +60,9 @@ class DirectAU_KGModule(BaseModule):
         r_emb = self._normalize(self.relation_embed(relation))
         t_emb = self._normalize(self.entity_embed(tail))
         w_rel = self.relation_attn(relation)
+        b_rel = self.relation_attn_bias(relation)
 
-        q = self._compose(h_emb, r_emb, w_rel)
+        q = self._compose(h_emb, r_emb, w_rel, b_rel)
         
         # Alignment loss = ||q - t||_2^2 per triple
         return (q - t_emb).norm(p=2, dim=-1).pow(2)
@@ -80,8 +84,9 @@ class DirectAU_KGModule(BaseModule):
         r_emb = self._normalize(self.relation_embed(relation))
         t_emb = self._normalize(self.entity_embed(tail))
         w_rel = self.relation_attn(relation)
+        b_rel = self.relation_attn_bias(relation)
         
-        q = self._compose(h_emb, r_emb, w_rel)
+        q = self._compose(h_emb, r_emb, w_rel, b_rel)
         # Return squared L2 distance (useful for training alignment loss)
         return (q - t_emb).norm(p=2, dim=-1).pow(2)
 
@@ -96,8 +101,9 @@ class DirectAU_KGModule(BaseModule):
         r_emb = self._normalize(self.relation_embed(relation))
         t_emb = self._normalize(self.entity_embed(tail))
         w_rel = self.relation_attn(relation)
+        b_rel = self.relation_attn_bias(relation)
 
-        q = self._compose(h_emb, r_emb, w_rel)
+        q = self._compose(h_emb, r_emb, w_rel, b_rel)
         return (q * t_emb).sum(dim=-1)
 
     def prob_logit(self, head: torch.Tensor, relation: torch.Tensor, tail: torch.Tensor) -> torch.Tensor:
@@ -150,6 +156,9 @@ class DirectAUKG(BaseModel):
 
         for epoch in range(self.n_epoch):
             epoch_loss = 0.0
+            epoch_align = 0.0
+            epoch_unif = 0.0
+            epoch_neg = 0.0
             
             # Shuffle data
             rand_idx = torch.randperm(n_train)
@@ -190,7 +199,8 @@ class DirectAUKG(BaseModel):
                     h_emb = self.model._normalize(self.model.entity_embed(h_batch))
                     r_emb = self.model._normalize(self.model.relation_embed(r_batch))
                     w_rel = self.model.relation_attn(r_batch)
-                    q = self.model._compose(h_emb, r_emb, w_rel)
+                    b_rel = self.model.relation_attn_bias(r_batch)
+                    q = self.model._compose(h_emb, r_emb, w_rel, b_rel)
 
                     # Handle single negative per sample (1D) or multiple (2D)
                     if t_corrupt.dim() == 1:
@@ -212,9 +222,23 @@ class DirectAUKG(BaseModel):
                 self.opt.step()
                 
                 epoch_loss += loss.item() * batch_size
+                epoch_align += loss_align_normalized.item() * batch_size
+                epoch_unif += loss_unif.item() * batch_size
+                epoch_neg += loss_neg.item() * batch_size
 
             avg_loss = epoch_loss / n_train
-            logging.info('Epoch %d/%d, Total Loss=%f', epoch + 1, self.n_epoch, avg_loss)
+            avg_align = epoch_align / n_train
+            avg_unif = epoch_unif / n_train
+            avg_neg = epoch_neg / n_train
+            logging.info(
+                'Epoch %d/%d, Total Loss=%f, Align=%f, Uni=%f, Neg=%f',
+                epoch + 1,
+                self.n_epoch,
+                avg_loss,
+                avg_align,
+                avg_unif,
+                avg_neg,
+            )
 
             # Evaluation and Early Stopping
             if ((self.n_epoch >= self.epoch_per_test) and ((epoch + 1) % self.epoch_per_test == 0)):

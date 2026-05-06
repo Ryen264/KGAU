@@ -316,27 +316,17 @@ def main() -> None:
 
 	results = []
 	
-	# Train and evaluate each selected model
+	# Train and evaluate each selected model (skip TransE baseline)
 	for model_type in args.models:
+		if model_type == "TransE":
+			logging.info("Skipping TransE baseline training.")
+			continue
 		set_seed(args.seed)
 		logging.info(f"\n{'='*80}")
 		logging.info(f"Training {model_type} model...")
 		logging.info(f"{'='*80}")
 		
-		if model_type == "TransE":
-			model = TransE(n_entity, n_relation)
-			result = train_and_evaluate(
-				model_name="TransE (Canonical)",
-				model=model,
-				train_triplets=train_triplets,
-				valid_triplets=valid_triplets,
-				test_triplets=test_triplets,
-				valid_cls=valid_cls,
-				test_cls=test_cls,
-				n_entity=n_entity,
-				early_stop_patience=args.early_stop_patience,
-			)
-		elif model_type == "DirectAU-KG":
+		if model_type == "DirectAU-KG":
 			model = DirectAUKG(n_entity, n_relation)
 			result = train_and_evaluate(
 				model_name=f"DirectAU-TransE (gamma={args.gamma})",
@@ -349,8 +339,8 @@ def main() -> None:
 				n_entity=n_entity,
 				early_stop_patience=args.early_stop_patience,
 			)
-		
-		results.append(result)
+
+			results.append(result)
 
 	print_summary(tuple(results))
 
