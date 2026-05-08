@@ -236,14 +236,14 @@ class BaseModel(object):
                         key_head = (tail_id, relation_id)
                         if key_head in heads and heads[key_head]._nnz() > 1:
                             tmp = head_scores[head_id].item()
-                            penalty = heads[key_head].to(config.device) * FILTER_RANKING_PENALTY
+                            penalty = heads[key_head].to(head_scores.device) * FILTER_RANKING_PENALTY
                             head_scores = head_scores - penalty if higher_is_better else head_scores + penalty
                             head_scores[head_id] = tmp
                             
                         key_tail = (head_id, relation_id)
                         if key_tail in tails and tails[key_tail]._nnz() > 1:
                             tmp = tail_scores[tail_id].item()
-                            penalty = tails[key_tail].to(config.device) * FILTER_RANKING_PENALTY
+                            penalty = tails[key_tail].to(tail_scores.device) * FILTER_RANKING_PENALTY
                             tail_scores = tail_scores - penalty if higher_is_better else tail_scores + penalty
                             tail_scores[tail_id] = tmp
 
