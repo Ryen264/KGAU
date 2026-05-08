@@ -15,6 +15,14 @@ from datasets import BernCorrupter, sparse_heads_tails
 from model import DirectAUKG
 from transe import TransE
 
+# Global list of gamma pairs for test cases: (gamma_uni, gamma_neg)
+GAMMA_PAIRS = [
+	(0.0, 0.0),
+	(0.0, 1.0),
+	(1.0, 0.0),
+	(1.0, 1.0),
+]
+
 
 @dataclass
 class ExperimentResult:
@@ -49,9 +57,9 @@ def parse_args() -> argparse.Namespace:
 	parser.add_argument("--n_epoch", type=int, default=200, help="Training epochs.")
 	parser.add_argument("--batch_size", type=int, default=128, help="Training batch size.")
 	parser.add_argument("--lr", type=float, default=1e-3, help="Learning rate.")
-	parser.add_argument("--gamma", type=float, default=None, help="Uniformity weight for DirectAU-TransE (overrides config when set).")
-	parser.add_argument("--models", nargs="+", default=["TransE", "DirectAU-KG"], choices=["TransE", "DirectAU-KG"],
-		help="Models to train and compare.")
+	parser.add_argument("--gamma_uni", type=float, default=None, help="Uniformity weight for DirectAU-TransE (overrides config when set).")
+	parser.add_argument("--gamma_neg", type=float, default=None, help="Negative sampling weight for DirectAU-TransE (overrides config when set).")
+	parser.add_argument("--models", nargs="+", default=["TransE", "DirectAU-KG"], choices=["TransE", "DirectAU-KG"], help="Models to train and compare.")
 
 	args = parser.parse_args()
 	if args.config_path:
@@ -100,10 +108,9 @@ def _clone_cfg(cfg):
 		return [_clone_cfg(v) for v in cfg]
 	return cfg
 
-
-
 def build_runtime_config(args: argparse.Namespace) -> None:
-	effective_gamma = args.gamma if args.gamma is not None else 1.0
+	effective_gamma_uni = args.gamma_uni if args.gamma_uni is not None else 1.0
+	effective_gamma_neg = args.gamma_neg if args.gamma_neg is not None else 0.0
 	runtime_cfg = {
 		"dataset": args.dataset,
 		"task": "comparison",
@@ -133,7 +140,8 @@ def build_runtime_config(args: argparse.Namespace) -> None:
 			"optimizer": "Adam",
 			"learning_rate": args.lr,
 			"dim": args.dim,
-			"gamma": effective_gamma,
+			"gamma_uni": effective_gamma_uni,
+			"gamma_neg": effective_gamma_neg,
 		},
 	}
 	config._config = _to_cfg(runtime_cfg)
@@ -165,15 +173,20 @@ def load_config(args: argparse.Namespace) -> None:
 		if "test_batch_size" not in cfg:
 			cfg["test_batch_size"] = args.test_batch_size
 
-		# If CLI did not override gamma, inherit from config for user-facing labels/summary.
-		if args.gamma is None:
+		# If CLI did not override gamma_uni/gamma_neg, inherit from config for user-facing labels/summary.
+		if args.gamma_uni is None:
 			direct_cfg = cfg.get("DirectAU-KG", {})
-			args.gamma = direct_cfg.get("gamma_uni", direct_cfg.get("gamma", 1.0))
+			args.gamma_uni = direct_cfg.get("gamma_uni", direct_cfg.get("gamma", 1.0))
+		if args.gamma_neg is None:
+			direct_cfg = cfg.get("DirectAU-KG", {})
+			args.gamma_neg = direct_cfg.get("gamma_neg", 0.0)
 	else:
 		logging.warning("Config file not found at %s. Falling back to runtime defaults.", args.config)
 		build_runtime_config(args)
-		if args.gamma is None:
-			args.gamma = 1.0
+		if args.gamma_uni is None:
+			args.gamma_uni = 1.0
+		if args.gamma_neg is None:
+			args.gamma_neg = 0.0
 
 def build_paths(args: argparse.Namespace) -> Dict[str, str]:
 	base_dir = os.path.join(args.data_root, args.dataset)
@@ -292,62 +305,57 @@ def print_summary(results: Tuple[ExperimentResult, ...]) -> None:
 
 def main() -> None:
 	args = parse_args()
-	run_tag = time.strftime("%Y%m%d_%H%M%S")
 	set_seed(args.seed)
-	load_config(args)
-	apply_run_artifact_names(run_tag)
-	log_file_path = setup_logging(args, run_tag)
-	if log_file_path:
-		logging.info("Writing logs to %s", log_file_path)
-
-	gpu_id = args.gpu if args.gpu is not None else config.select_gpu()
-	config.device = config.set_device(gpu_id)
-
-	paths = build_paths(args)
-	validate_paths(paths)
-
-	kb_index = index_entity_relation(
-		paths["train"],
-		paths["valid"],
-		paths["test"],
-		paths["valid_cls"],
-		paths["test_cls"],
-	)
-	n_entity, n_relation = graph_size(kb_index)
-	logging.info("Graph size: n_entity=%d, n_relation=%d", n_entity, n_relation)
-
-	train_triplets = to_tensor_triplets(read_data(paths["train"], kb_index))
-	valid_triplets = to_tensor_triplets(read_data(paths["valid"], kb_index))
-	test_triplets = to_tensor_triplets(read_data(paths["test"], kb_index))
-	valid_cls = to_tensor_quadruples(read_data(paths["valid_cls"], kb_index, with_label=True))
-	test_cls = to_tensor_quadruples(read_data(paths["test_cls"], kb_index, with_label=True))
-
-	results = []
 	
-	# Train and evaluate each selected model
-	for model_type in args.models:
-		set_seed(args.seed)
-		logging.info(f"\n{'='*80}")
-		logging.info(f"Training {model_type} model...")
-		logging.info(f"{'='*80}")
+	# If GAMMA_PAIRS has multiple entries, run all gamma pairs
+	if len(GAMMA_PAIRS) > 1:
+		args.n_epoch = 1000
+		args.dim = 100
+		all_results = []
 		
-		if model_type == "TransE":
-			model = TransE(n_entity, n_relation)
-			result = train_and_evaluate(
-				model_name="TransE (Canonical)",
-				model=model,
-				train_triplets=train_triplets,
-				valid_triplets=valid_triplets,
-				test_triplets=test_triplets,
-				valid_cls=valid_cls,
-				test_cls=test_cls,
-				n_entity=n_entity,
-				early_stop_patience=args.early_stop_patience,
+		for gamma_uni, gamma_neg in GAMMA_PAIRS:
+			args.gamma_uni = gamma_uni
+			args.gamma_neg = gamma_neg
+			
+			run_tag = time.strftime("%Y%m%d_%H%M%S")
+			# Rebuild config with new gamma values
+			config._config = None
+			build_runtime_config(args)
+			apply_run_artifact_names(run_tag)
+			log_file_path = setup_logging(args, run_tag)
+			if log_file_path:
+				logging.info("Writing logs to %s", log_file_path)
+
+			gpu_id = args.gpu if args.gpu is not None else config.select_gpu()
+			config.device = config.set_device(gpu_id)
+
+			paths = build_paths(args)
+			validate_paths(paths)
+
+			kb_index = index_entity_relation(
+				paths["train"],
+				paths["valid"],
+				paths["test"],
+				paths["valid_cls"],
+				paths["test_cls"],
 			)
-		elif model_type == "DirectAU-KG":
+			n_entity, n_relation = graph_size(kb_index)
+			logging.info("Graph size: n_entity=%d, n_relation=%d", n_entity, n_relation)
+
+			train_triplets = to_tensor_triplets(read_data(paths["train"], kb_index))
+			valid_triplets = to_tensor_triplets(read_data(paths["valid"], kb_index))
+			test_triplets = to_tensor_triplets(read_data(paths["test"], kb_index))
+			valid_cls = to_tensor_quadruples(read_data(paths["valid_cls"], kb_index, with_label=True))
+			test_cls = to_tensor_quadruples(read_data(paths["test_cls"], kb_index, with_label=True))
+
+			set_seed(args.seed)
+			logging.info(f"\n{'='*80}")
+			logging.info(f"[Test Case] gamma_uni={gamma_uni}, gamma_neg={gamma_neg}")
+			logging.info(f"{'='*80}")
+			
 			model = DirectAUKG(n_entity, n_relation)
 			result = train_and_evaluate(
-				model_name=f"DirectAU-TransE (gamma={args.gamma})",
+				model_name=f"DirectAU-TransE (gamma_uni={gamma_uni}, gamma_neg={gamma_neg})",
 				model=model,
 				train_triplets=train_triplets,
 				valid_triplets=valid_triplets,
@@ -357,10 +365,78 @@ def main() -> None:
 				n_entity=n_entity,
 				early_stop_patience=args.early_stop_patience,
 			)
+			all_results.append(result)
 		
-		results.append(result)
+		print_summary(tuple(all_results))
+	else:
+		run_tag = time.strftime("%Y%m%d_%H%M%S")
+		load_config(args)
+		apply_run_artifact_names(run_tag)
+		log_file_path = setup_logging(args, run_tag)
+		if log_file_path:
+			logging.info("Writing logs to %s", log_file_path)
 
-	print_summary(tuple(results))
+		gpu_id = args.gpu if args.gpu is not None else config.select_gpu()
+		config.device = config.set_device(gpu_id)
+
+		paths = build_paths(args)
+		validate_paths(paths)
+
+		kb_index = index_entity_relation(
+			paths["train"],
+			paths["valid"],
+			paths["test"],
+			paths["valid_cls"],
+			paths["test_cls"],
+		)
+		n_entity, n_relation = graph_size(kb_index)
+		logging.info("Graph size: n_entity=%d, n_relation=%d", n_entity, n_relation)
+
+		train_triplets = to_tensor_triplets(read_data(paths["train"], kb_index))
+		valid_triplets = to_tensor_triplets(read_data(paths["valid"], kb_index))
+		test_triplets = to_tensor_triplets(read_data(paths["test"], kb_index))
+		valid_cls = to_tensor_quadruples(read_data(paths["valid_cls"], kb_index, with_label=True))
+		test_cls = to_tensor_quadruples(read_data(paths["test_cls"], kb_index, with_label=True))
+
+		results = []
+		
+		# Train and evaluate each selected model
+		for model_type in args.models:
+			set_seed(args.seed)
+			logging.info(f"\n{'='*80}")
+			logging.info(f"Training {model_type} model...")
+			logging.info(f"{'='*80}")
+			
+			if model_type == "TransE":
+				model = TransE(n_entity, n_relation)
+				result = train_and_evaluate(
+					model_name="TransE (Canonical)",
+					model=model,
+					train_triplets=train_triplets,
+					valid_triplets=valid_triplets,
+					test_triplets=test_triplets,
+					valid_cls=valid_cls,
+					test_cls=test_cls,
+					n_entity=n_entity,
+					early_stop_patience=args.early_stop_patience,
+				)
+			elif model_type == "DirectAU-KG":
+				model = DirectAUKG(n_entity, n_relation)
+				result = train_and_evaluate(
+					model_name=f"DirectAU-TransE (gamma_uni={args.gamma_uni}, gamma_neg={args.gamma_neg})",
+					model=model,
+					train_triplets=train_triplets,
+					valid_triplets=valid_triplets,
+					test_triplets=test_triplets,
+					valid_cls=valid_cls,
+					test_cls=test_cls,
+					n_entity=n_entity,
+					early_stop_patience=args.early_stop_patience,
+				)
+			
+			results.append(result)
+
+		print_summary(tuple(results))
 
 
 if __name__ == "__main__":
