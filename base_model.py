@@ -198,34 +198,34 @@ class BaseModel(object):
         with torch.no_grad():
             for batch_head, batch_relation, batch_tail in batch_by_size(self.test_batch_size, *test_data_no_label):
                 batch_size = batch_head.size(0)
-                    # To avoid OOM when number of entities is large, score candidates in chunks
-                    # instead of materializing embeddings of shape [batch, n_entity, dim].
-                    device = config.device
-                    relation_col = batch_relation.unsqueeze(1)
-                    tail_col = batch_tail.unsqueeze(1)
-                    head_col = batch_head.unsqueeze(1)
+                # To avoid OOM when number of entities is large, score candidates in chunks
+                # instead of materializing embeddings of shape [batch, n_entity, dim].
+                device = config.device
+                relation_col = batch_relation.unsqueeze(1)
+                tail_col = batch_tail.unsqueeze(1)
+                head_col = batch_head.unsqueeze(1)
 
-                    candidate_chunk = 1024
+                candidate_chunk = 1024
 
-                    # Compute head scores: iterate candidate head id chunks
-                    head_scores_parts = []
-                    for start in range(0, self.n_entity, candidate_chunk):
-                        end = min(start + candidate_chunk, self.n_entity)
-                        cand = torch.arange(start, end).unsqueeze(0).expand(batch_size, end - start).long().to(device)
-                        rel_chunk = relation_col.expand(batch_size, end - start).to(device)
-                        tail_chunk = tail_col.expand(batch_size, end - start).to(device)
-                        head_scores_parts.append(self.model.score(cand, rel_chunk, tail_chunk).cpu())
-                    batch_head_scores = torch.cat(head_scores_parts, dim=1)
+                # Compute head scores: iterate candidate head id chunks
+                head_scores_parts = []
+                for start in range(0, self.n_entity, candidate_chunk):
+                    end = min(start + candidate_chunk, self.n_entity)
+                    cand = torch.arange(start, end).unsqueeze(0).expand(batch_size, end - start).long().to(device)
+                    rel_chunk = relation_col.expand(batch_size, end - start).to(device)
+                    tail_chunk = tail_col.expand(batch_size, end - start).to(device)
+                    head_scores_parts.append(self.model.score(cand, rel_chunk, tail_chunk).cpu())
+                batch_head_scores = torch.cat(head_scores_parts, dim=1)
 
-                    # Compute tail scores: iterate candidate tail id chunks
-                    tail_scores_parts = []
-                    for start in range(0, self.n_entity, candidate_chunk):
-                        end = min(start + candidate_chunk, self.n_entity)
-                        cand = torch.arange(start, end).unsqueeze(0).expand(batch_size, end - start).long().to(device)
-                        rel_chunk = relation_col.expand(batch_size, end - start).to(device)
-                        head_chunk = head_col.expand(batch_size, end - start).to(device)
-                        tail_scores_parts.append(self.model.score(head_chunk, rel_chunk, cand).cpu())
-                    batch_tail_scores = torch.cat(tail_scores_parts, dim=1)
+                # Compute tail scores: iterate candidate tail id chunks
+                tail_scores_parts = []
+                for start in range(0, self.n_entity, candidate_chunk):
+                    end = min(start + candidate_chunk, self.n_entity)
+                    cand = torch.arange(start, end).unsqueeze(0).expand(batch_size, end - start).long().to(device)
+                    rel_chunk = relation_col.expand(batch_size, end - start).to(device)
+                    head_chunk = head_col.expand(batch_size, end - start).to(device)
+                    tail_scores_parts.append(self.model.score(head_chunk, rel_chunk, cand).cpu())
+                batch_tail_scores = torch.cat(tail_scores_parts, dim=1)
             
                 batch_head_scores = batch_head_scores.detach()
                 batch_tail_scores = batch_tail_scores.detach()
