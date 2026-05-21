@@ -48,7 +48,7 @@ From `config_wn18rr_distilbert-base-uncased.yaml`:
 
 ```yaml
 encoder_name: distilbert-base-uncased
-dim: 384                           # Hidden dimension of DistilBERT
+dim: 768                           # Hidden dimension of distilbert-base-uncased
 max_length: 64                      # Max tokens per description
 encode_batch_size: 14               # Micro-batch for encoding
 gradient_checkpointing: false       # Memory optimization
@@ -76,8 +76,8 @@ Where:
 
 **Computation**:
 ```python
-q_full = self.model.encode_query(h_batch, r_batch)      # [batch_size, 384]
-t_full = self.model.encode_tail(t_batch)                # [batch_size, 384]
+q_full = self.model.encode_query(h_batch, r_batch)      # [batch_size, 768]
+t_full = self.model.encode_tail(t_batch)                # [batch_size, 768]
 loss_align = (q_full - t_full).norm(p=2, dim=-1).pow(2).mean()
 ```
 
@@ -100,7 +100,7 @@ $$L_{\text{uni}}(x) = \log\left(\text{mean}_{i<j}\left[\exp\left(-2 \| x_i - x_j
 **Chunked Implementation** (handles large batches efficiently):
 ```python
 def uniformity_loss(self, x: torch.Tensor) -> torch.Tensor:
-    # Input: x of shape [n_samples, 384]
+    # Input: x of shape [n_samples, 768]
     
     # Optional subsampling (for memory)
     if self.uniformity_max_samples > 0 and x.size(0) > self.uniformity_max_samples:
@@ -251,10 +251,10 @@ For each test triple (h, r, t):
 ```
 1. Pre-compute: Encode ALL entity descriptions once
    entity_matrix = [encode_tail(0), encode_tail(1), ..., encode_tail(n_entity-1)]
-   Shape: [n_entity, 384]
+    Shape: [n_entity, 768]
 
 2. For tail prediction (h, r, ?):
-   q_tail = encode_query(h, r)                         # [384]
+    q_tail = encode_query(h, r)                         # [768]
    tail_scores = -dot(q_tail, entity_matrix.T)         # [n_entity]
    rank_tail = argsort(tail_scores)
    target_rank = rank_tail.index(t) + 1

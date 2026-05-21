@@ -1,10 +1,10 @@
-test_batch_size: 32
+﻿test_batch_size: 32
 dataset: wn18rr
 task: all
 DirectAUKG:
   optimizer: AdamW
   learning_rate: 0.00003
-  dim: 384
+  dim: 768
   gamma: 1.0
   encoder_name: distilbert-base-uncased
   max_length: 64
@@ -22,6 +22,11 @@ DirectAUKG:
   uniformity_max_samples: 170
   uniformity_chunk_size: 128
   forward_chunk_size: 32768
+  use_link_graph: true
+  link_graph_max_neighbors: 10
+  neighbor_min_tokens: 20
+  neighbor_text_field: entity
+  triplet_masking_for_neighbors: true
   epoch_per_test: 10
   model_file: DirectAUKG.mdl
 TransE:

@@ -23,7 +23,7 @@ Knowledge Graph Triples: (h, r, t)
     L2 Normalize          L2 Normalize
          ↓                       ↓
     Query Embeddings      Tail Embeddings
-    (e.g., 384-dim)       (e.g., 384-dim)
+        (e.g., 768-dim)       (e.g., 768-dim)
          ↓                       ↓
          └───────────────┬───────┘
                          ↓
@@ -50,9 +50,9 @@ START EPOCH
     ↓
 FOR each batch of (h, r, t):
     │
-    ├─→ [Encode h, r with HR Encoder]  → q_batch [B × 384]
+        ├─→ [Encode h, r with HR Encoder]  → q_batch [B × 768]
     │
-    ├─→ [Encode t with T Encoder]      → t_batch [B × 384]
+        ├─→ [Encode t with T Encoder]      → t_batch [B × 768]
     │
     ├─→ [Alignment Loss]
     │   loss_align = mean(||q - t||₂²)
@@ -106,11 +106,11 @@ END EPOCH
 
 ### Alignment Loss
 ```
-Input: Query batch [B × 384], Tail batch [B × 384]
+Input: Query batch [B × 768], Tail batch [B × 768]
        (both L2-normalized)
 
 Step 1: Compute difference vectors
-        diff = q_batch - t_batch  [B × 384]
+        diff = q_batch - t_batch  [B × 768]
 
 Step 2: Compute L2 norms
         norms = ||diff||₂        [B]
@@ -126,7 +126,7 @@ Output: Scalar loss value
 
 ### Uniformity Loss (Simplified)
 ```
-Input: Unique embeddings x [N × 384]
+Input: Unique embeddings x [N × 768]
        (N = num unique queries or entities)
 
 Step 1: Subsample if N > uniformity_max_samples
@@ -163,7 +163,7 @@ Given: Test triple (h_test, r_test, t_test)
 
 Step 1: Pre-compute all entity embeddings (done once per test set)
         entity_matrix = [encode(e_0), encode(e_1), ..., encode(e_n)]
-        Shape: [n_entities × 384]
+        Shape: [n_entities × 768]
 
 Step 2: Tail Prediction (h_test, r_test, ?)
         ├─→ q_tail = encode_query(h_test, r_test)
@@ -215,10 +215,10 @@ Step 3: Encode unique queries
         q_unique_emb = encode_query(
             unique_queries[:, 0],  # unique heads
             unique_queries[:, 1]   # unique relations
-        )  [num_unique_queries × 384]
+        )  [num_unique_queries × 768]
 
 Step 4: Map back to original batch size
-        q_batch_emb = q_unique_emb[q_inverse]  [B × 384]
+        q_batch_emb = q_unique_emb[q_inverse]  [B × 768]
 
 Step 5: Find unique tails
         unique_tails, t_inverse = torch.unique(
@@ -227,10 +227,10 @@ Step 5: Find unique tails
         )  [num_unique_tails]
 
 Step 6: Encode unique tails
-        t_unique_emb = encode_tail(unique_tails)  [num_unique_tails × 384]
+        t_unique_emb = encode_tail(unique_tails)  [num_unique_tails × 768]
 
 Step 7: Map back to original batch size
-        t_batch_emb = t_unique_emb[t_inverse]  [B × 384]
+        t_batch_emb = t_unique_emb[t_inverse]  [B × 768]
 
 Step 8: Compute distances
         dist = ||q_batch_emb - t_batch_emb||₂  [B]
@@ -357,7 +357,7 @@ Output: Same as non-chunked version, but processed in smaller pieces
 | $\sigma$ | L2 normalization function |
 | $\gamma$ | Uniformity loss weight hyperparameter |
 | $B$ | Batch size |
-| $d$ | Embedding dimension (384 for DistilBERT) |
+| $d$ | Embedding dimension (768 for distilbert-base-uncased) |
 | $n$ | Number of entities in knowledge graph |
 
 ---

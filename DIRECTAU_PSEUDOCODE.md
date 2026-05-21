@@ -125,13 +125,13 @@ FUNCTION encode_text_pairs(left_texts, right_texts, encoder, tokenizer, max_leng
         encoded = {k: v.to(device) for k, v in encoded.items()}
         
         # Forward pass through encoder
-        hidden = encoder(**encoded).last_hidden_state      # [batch_size, seq_len, 384]
+        hidden = encoder(**encoded).last_hidden_state      # [batch_size, seq_len, 768]
         
         # Mean pooling with attention mask
         mask = encoded['attention_mask'].unsqueeze(-1)
         sum_embeddings = (hidden * mask).sum(dim=1)
         denom = mask.sum(dim=1).clamp(min=1.0)
-        pooled = sum_embeddings / denom                    # [batch_size, 384]
+        pooled = sum_embeddings / denom                    # [batch_size, 768]
         
         # L2 normalize to unit hypersphere
         normalized = pooled / (pooled.norm(p=2, dim=-1, keepdim=True) + epsilon)
@@ -174,7 +174,7 @@ FUNCTION encode_query(head_ids, relation_ids, hr_encoder, tokenizer, entity_text
         batch_size=14
     )
     
-    RETURN query_embeddings    # [batch_size, 384], normalized
+    RETURN query_embeddings    # [batch_size, 768], normalized
 
 END FUNCTION
 
@@ -221,7 +221,7 @@ FUNCTION encode_tail(tail_ids, t_encoder, tokenizer, entity_texts):
         
         all_embeddings.append(normalized)
     
-    RETURN torch.cat(all_embeddings, dim=0)    # [batch_size, 384], normalized
+    RETURN torch.cat(all_embeddings, dim=0)    # [batch_size, 768], normalized
 
 END FUNCTION
 
@@ -236,7 +236,7 @@ FUNCTION alignment_loss(query_embeddings, tail_embeddings):
     Both q and t are L2-normalized vectors
     """
     
-    diff = query_embeddings - tail_embeddings        # [batch_size, 384]
+    diff = query_embeddings - tail_embeddings        # [batch_size, 768]
     distances = torch.norm(diff, p=2, dim=-1)        # [batch_size]
     squared_distances = distances ** 2               # [batch_size]
     loss = torch.mean(squared_distances)             # scalar
@@ -273,14 +273,14 @@ FUNCTION uniformity_loss(embeddings, max_samples=170, chunk_size=128):
     # Chunked computation to avoid O(n²) memory
     FOR i_start FROM 0 TO n STEP chunk_size:
         i_end = MIN(i_start + chunk_size, n)
-        xi = embeddings[i_start:i_end]              # [chunk_size, 384]
+        xi = embeddings[i_start:i_end]              # [chunk_size, 768]
         
         FOR j_start FROM i_start TO n STEP chunk_size:
             j_end = MIN(j_start + chunk_size, n)
-            xj = embeddings[j_start:j_end]          # [chunk_size, 384]
+            xj = embeddings[j_start:j_end]          # [chunk_size, 768]
             
             # Pairwise squared Euclidean distances
-            diff = xi.unsqueeze(1) - xj.unsqueeze(0)    # [ci, cj, 384]
+            diff = xi.unsqueeze(1) - xj.unsqueeze(0)    # [ci, cj, 768]
             dist_sq = (diff ** 2).sum(dim=-1)           # [ci, cj]
             
             # Exponential kernel
@@ -329,7 +329,7 @@ FUNCTION extract_unique_embeddings(head_ids, relation_ids, tail_ids,
     unique_query_emb = encode_query_func(
         unique_queries[:, 0],
         unique_queries[:, 1]
-    )  // [num_unique_queries, 384]
+    )  // [num_unique_queries, 768]
     
     // Find unique tails and mapping indices
     unique_tails, tail_inverse = torch.unique(
@@ -338,7 +338,7 @@ FUNCTION extract_unique_embeddings(head_ids, relation_ids, tail_ids,
     )
     
     // Encode unique tails
-    unique_tail_emb = encode_tail_func(unique_tails)  // [num_unique_tails, 384]
+    unique_tail_emb = encode_tail_func(unique_tails)  // [num_unique_tails, 768]
     
     RETURN {
         'unique_query_emb': unique_query_emb,
@@ -578,7 +578,7 @@ FUNCTION test_link_prediction(model, test_triples, config):
             model.t_encoder,
             model.tokenizer,
             model.entity_texts
-        )  // [n_entity, 384]
+        )  // [n_entity, 768]
         
         // Initialize metrics
         mr_total = 0.0
@@ -695,7 +695,7 @@ END FUNCTION
 # ============================================================================
 
 LOSS FUNCTION alignment_loss:
-    INPUT: query_embeddings [B × 384], tail_embeddings [B × 384]
+    INPUT: query_embeddings [B × 768], tail_embeddings [B × 768]
     OUTPUT: scalar loss
     
     Formula: L_align = mean(||q - t||₂²)
@@ -714,7 +714,7 @@ END FUNCTION
 
 
 LOSS FUNCTION uniformity_loss:
-    INPUT: embeddings [N × 384]
+    INPUT: embeddings [N × 768]
     OUTPUT: scalar loss
     
     Formula: L_uni = log(mean_{i<j}[exp(-2 * ||x_i - x_j||₂²)])

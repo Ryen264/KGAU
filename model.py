@@ -2,13 +2,14 @@ import torch
 import torch.nn as nn
 import logging
 import os
-from typing import Dict, List, Tuple
+from typing import Dict, List, Optional, Tuple
 from torch.optim import Adam, AdamW, SGD, Adagrad, RMSprop
 from transformers import AutoModel, AutoTokenizer
 
 import config
 from base_model import BaseModule, BaseModel, FILTER_RANKING_PENALTY
 from datasets import batch_by_num
+from graph_context import LinkGraph
 from metrics import ranking_metrics
 
 OPTIMIZER_MAP = {
@@ -29,6 +30,8 @@ class DirectAU_KGModule(BaseModule):
         model_config: config.config,
         entity_texts: List[str],
         relation_texts: List[str],
+        link_graph: Optional[LinkGraph]=None,
+        entity_names: Optional[List[str]]=None,
     ):
         super().__init__()
         self.model_type = 'DirectAU_KG'
@@ -41,10 +44,19 @@ class DirectAU_KGModule(BaseModule):
         self.uniformity_max_samples = int(model_config.get('uniformity_max_samples', 0))
         self.uniformity_chunk_size = max(1, int(model_config.get('uniformity_chunk_size', 256)))
         self.forward_chunk_size = max(1, int(model_config.get('forward_chunk_size', 65536)))
+        self.use_link_graph = bool(model_config.get('use_link_graph', False))
+        self.link_graph_max_neighbors = max(0, int(model_config.get('link_graph_max_neighbors', 10)))
+        self.neighbor_min_tokens = max(0, int(model_config.get('neighbor_min_tokens', 20)))
+        self.neighbor_text_field = str(model_config.get('neighbor_text_field', 'entity')).strip().lower()
+        self.triplet_masking_for_neighbors = bool(model_config.get('triplet_masking_for_neighbors', True))
 
         self.n_entity, self.n_relation = n_entity, n_relation
+        self.base_entity_texts = entity_texts
         self.entity_texts = entity_texts
+        self.entity_names = entity_names if entity_names is not None else entity_texts
         self.relation_texts = relation_texts
+        self.link_graph = link_graph
+        self._aug_text_cache: Dict[Tuple[int, Optional[int]], str] = {}
 
         self.tokenizer = AutoTokenizer.from_pretrained(self.encoder_name)
         self.hr_encoder = AutoModel.from_pretrained(self.encoder_name)
@@ -98,6 +110,7 @@ class DirectAU_KGModule(BaseModule):
 
         self.dim = self.hr_encoder.config.hidden_size
         self.is_distance_based = True
+        self._log_neighbor_augmentation_stats()
 
     def _normalize(self, x: torch.Tensor) -> torch.Tensor:
         """Projects vectors onto the unit hypersphere."""
@@ -111,6 +124,95 @@ class DirectAU_KGModule(BaseModule):
 
     def _ids_to_texts(self, ids: torch.Tensor, text_table: List[str]) -> List[str]:
         return [text_table[i] for i in ids.detach().cpu().tolist()]
+
+    def _neighbor_surface_text(self, entity_id: int) -> str:
+        if self.neighbor_text_field == 'entity_desc':
+            return self.base_entity_texts[entity_id]
+        return self.entity_names[entity_id]
+
+    def _build_aug_text(self, entity_id: int, exclude_id: Optional[int]=None) -> str:
+        cache_key = (entity_id, exclude_id)
+        if cache_key in self._aug_text_cache:
+            return self._aug_text_cache[cache_key]
+
+        base = self.base_entity_texts[entity_id]
+        if (not self.use_link_graph) or self.link_graph is None:
+            self._aug_text_cache[cache_key] = base
+            return base
+
+        if len(base.split()) >= self.neighbor_min_tokens:
+            self._aug_text_cache[cache_key] = base
+            return base
+
+        neighbor_ids = self.link_graph.get_neighbor_ids(entity_id, self.link_graph_max_neighbors)
+        if self.triplet_masking_for_neighbors and exclude_id is not None:
+            neighbor_ids = [nid for nid in neighbor_ids if nid != exclude_id]
+
+        # Safety check to catch accidental leakage during training-time augmentation.
+        if exclude_id is not None and self.triplet_masking_for_neighbors and exclude_id in neighbor_ids:
+            raise RuntimeError('Triplet masking failed: excluded endpoint still present in neighbor list.')
+
+        if not neighbor_ids:
+            self._aug_text_cache[cache_key] = base
+            return base
+
+        neighbor_texts = [self._neighbor_surface_text(nid).strip() for nid in neighbor_ids]
+        neighbor_texts = [txt for txt in neighbor_texts if txt]
+        if not neighbor_texts:
+            self._aug_text_cache[cache_key] = base
+            return base
+
+        aug_text = (base + ' ' + ' '.join(neighbor_texts)).strip()
+        self._aug_text_cache[cache_key] = aug_text
+        return aug_text
+
+    def _resolve_exclude_ids(self, ids: torch.Tensor, exclude_ids: Optional[torch.Tensor]) -> List[Optional[int]]:
+        if exclude_ids is None:
+            return [None] * ids.numel()
+        return [int(v) for v in exclude_ids.detach().cpu().tolist()]
+
+    def _build_entity_texts(self, ids: torch.Tensor, exclude_ids: Optional[torch.Tensor]=None) -> List[str]:
+        id_list = ids.detach().cpu().tolist()
+        exclude_list = self._resolve_exclude_ids(ids, exclude_ids)
+        return [
+            self._build_aug_text(int(entity_id), exclude_id)
+            for entity_id, exclude_id in zip(id_list, exclude_list)
+        ]
+
+    def _log_neighbor_augmentation_stats(self) -> None:
+        if not self.use_link_graph:
+            logging.info('Neighbor augmentation disabled (use_link_graph=false).')
+            return
+        if self.link_graph is None:
+            logging.warning('use_link_graph=true but no LinkGraph provided. Falling back to base texts.')
+            return
+
+        augmented = 0
+        total_neighbors = 0
+        for entity_id, base_text in enumerate(self.base_entity_texts):
+            if len(base_text.split()) >= self.neighbor_min_tokens:
+                continue
+            n_neighbors = len(self.link_graph.get_neighbor_ids(entity_id, self.link_graph_max_neighbors))
+            if n_neighbors > 0:
+                augmented += 1
+                total_neighbors += n_neighbors
+
+        pct_aug = (100.0 * augmented / max(1, self.n_entity))
+        avg_neighbors = (total_neighbors / max(1, augmented))
+        logging.info(
+            'Neighbor augmentation enabled: max_neighbors=%d, min_tokens=%d, text_field=%s, triplet_masking=%s, '
+            'augmented_entities=%d/%d (%.2f%%), avg_neighbors=%.2f, graph_nodes=%d, graph_edges=%d',
+            self.link_graph_max_neighbors,
+            self.neighbor_min_tokens,
+            self.neighbor_text_field,
+            self.triplet_masking_for_neighbors,
+            augmented,
+            self.n_entity,
+            pct_aug,
+            avg_neighbors,
+            self.link_graph.num_nodes(),
+            self.link_graph.num_edges_undirected(),
+        )
 
     def _encode_text_pairs(self, left_texts: List[str], right_texts: List[str]) -> torch.Tensor:
         outputs = []
@@ -153,23 +255,28 @@ class DirectAU_KGModule(BaseModule):
             outputs.append(pooled)
         return torch.cat(outputs, dim=0)
 
-    def encode_query(self, head: torch.Tensor, relation: torch.Tensor) -> torch.Tensor:
-        head_texts = self._ids_to_texts(head, self.entity_texts)
+    def encode_query(
+        self,
+        head: torch.Tensor,
+        relation: torch.Tensor,
+        exclude_tail: Optional[torch.Tensor]=None,
+    ) -> torch.Tensor:
+        head_texts = self._build_entity_texts(head, exclude_ids=exclude_tail)
         relation_texts = self._ids_to_texts(relation, self.relation_texts)
         q_raw = self._encode_text_pairs(head_texts, relation_texts)
         return self._normalize(q_raw)
 
     def encode_query_with_relation_texts(self, entities: torch.Tensor, relation_texts: List[str]) -> torch.Tensor:
-        entity_texts = self._ids_to_texts(entities, self.entity_texts)
+        entity_texts = self._build_entity_texts(entities, exclude_ids=None)
         q_raw = self._encode_text_pairs(entity_texts, relation_texts)
         return self._normalize(q_raw)
 
     def relation_ids_to_inverse_texts(self, relation: torch.Tensor) -> List[str]:
         rel_texts = self._ids_to_texts(relation, self.relation_texts)
-        return [f"inverse {text}".strip() for text in rel_texts]
+        return [f"inverse_{text.strip()}" for text in rel_texts]
 
-    def encode_tail(self, tail: torch.Tensor) -> torch.Tensor:
-        tail_texts = self._ids_to_texts(tail, self.entity_texts)
+    def encode_tail(self, tail: torch.Tensor, exclude_head: Optional[torch.Tensor]=None) -> torch.Tensor:
+        tail_texts = self._build_entity_texts(tail, exclude_ids=exclude_head)
         t_raw = self._encode_single_texts(tail_texts)
         return self._normalize(t_raw)
 
@@ -273,7 +380,15 @@ class DirectAU_KGModule(BaseModule):
 
 
 class DirectAUKG(BaseModel):
-    def __init__(self, n_entity: int, n_relation: int, entity_texts: List[str], relation_texts: List[str]):
+    def __init__(
+        self,
+        n_entity: int,
+        n_relation: int,
+        entity_texts: List[str],
+        relation_texts: List[str],
+        link_graph: Optional[LinkGraph]=None,
+        entity_names: Optional[List[str]]=None,
+    ):
         super().__init__(n_entity, n_relation)
         self.model_type = 'DirectAU_KG'
         self.model_config = config._config[self.model_type]
@@ -296,6 +411,8 @@ class DirectAUKG(BaseModel):
             self.model_config,
             entity_texts,
             relation_texts,
+            link_graph=link_graph,
+            entity_names=entity_names,
         )
         self.model.to(config.device)
         self.is_distance_based = self.model.is_distance_based
@@ -374,8 +491,8 @@ class DirectAUKG(BaseModel):
                     enabled=self.amp_enabled,
                 ):
                     # 1. Encode once and reuse for both alignment and uniformity to save memory.
-                    q_full = self.model.encode_query(h_batch, r_batch)
-                    t_full = self.model.encode_tail(t_batch)
+                    q_full = self.model.encode_query(h_batch, r_batch, exclude_tail=t_batch)
+                    t_full = self.model.encode_tail(t_batch, exclude_head=h_batch)
                     loss_align = (q_full - t_full).norm(p=2, dim=-1).pow(2).mean()
 
                     # 2. Uniformity on unique samples selected from the already encoded batch.

@@ -16,6 +16,7 @@ import torch
 import config
 from data_loader import graph_size, index_entity_relation, read_data
 from datasets import BernCorrupter, convert_data_to_no_label, sparse_heads_tails
+from graph_context import LinkGraph
 from model import DirectAUKG
 
 
@@ -167,6 +168,11 @@ def build_runtime_config(args: argparse.Namespace) -> None:
 			"uniformity_max_samples": 64,
 			"uniformity_chunk_size": 128,
 			"forward_chunk_size": 32768,
+			"use_link_graph": True,
+			"link_graph_max_neighbors": 10,
+			"neighbor_min_tokens": 20,
+			"neighbor_text_field": "entity",
+			"triplet_masking_for_neighbors": True,
 		},
 	}
 	config._config = _to_cfg(runtime_cfg)
@@ -460,6 +466,7 @@ def main() -> None:
 	logging.info("Graph size: n_entity=%d, n_relation=%d", n_entity, n_relation)
 
 	entity_texts = [e["entity_desc"] if "entity_desc" in e else e["entity"] for e in entities]
+	entity_names = [e["entity"] for e in entities]
 	relation_texts = list(relation_map.values())
 
 	# Helper to convert list of dicts to tensors
@@ -494,7 +501,18 @@ def main() -> None:
 	valid_cls_triplets = encode_triplets_with_labels(valid_examples)
 	test_cls_triplets = encode_triplets_with_labels(test_examples)
 
-	direct_model = DirectAUKG(n_entity, n_relation, entity_texts, relation_texts)
+	train_h_list = train_triplets[0].detach().cpu().tolist()
+	train_t_list = train_triplets[2].detach().cpu().tolist()
+	link_graph = LinkGraph(train_h_list, train_t_list)
+
+	direct_model = DirectAUKG(
+		n_entity,
+		n_relation,
+		entity_texts,
+		relation_texts,
+		link_graph=link_graph,
+		entity_names=entity_names,
+	)
 
 	direct_result = train_and_evaluate(
 		model_name="DirectAUKG",
